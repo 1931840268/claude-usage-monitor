@@ -1,0 +1,11 @@
+{
+  "name": "usage-monitor",
+  "version": "0.6.1",
+  "description": "Claude Code用量监控：各模型token用量与成本、5小时/7天限额窗口利用率与刷新时间、会话排行、工具调用统计、HTML可视化报告、状态栏实时显示",
+  "author": {
+    "name": "1931840268"
+  },
+  "homepage": "https://github.com/1931840268/claude-usage-monitor",
+  "license": "MIT",
+  "keywords": ["usage", "cost", "rate-limit", "statusline", "monitor"]
+}
