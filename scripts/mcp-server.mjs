@@ -14,7 +14,14 @@ import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 const USAGE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'usage.mjs');
-const VERSION = '0.6.0';
+// version always mirrors the plugin manifest — never drifts on release
+let VERSION = '0.0.0';
+try {
+  const { readFileSync } = await import('node:fs');
+  VERSION = JSON.parse(readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '.claude-plugin', 'plugin.json'),
+    'utf8')).version || VERSION;
+} catch { /* keep fallback */ }
 
 // name / description / numeric args (mapped to --flags) / usage.mjs subcommand
 const TOOLS = [
