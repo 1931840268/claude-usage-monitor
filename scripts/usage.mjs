@@ -185,7 +185,7 @@ const LIMIT_EVENT_RE = /usage limit reached\|(\d{9,13})/i;
  *   toolSink (from newToolSink()) — tool_use/tool_result frequency;
  *   limitEvents (array) — {ts, resetTs} for official rate-limit hits.
  */
-async function loadEntries({ sinceMs = 0, toolSink = null, limitEvents = null } = {}) {
+async function loadEntries({ sinceMs = 0, toolSink = null, limitEvents = null, apiErrors = null } = {}) {
   const seen = new Set();
   const entries = [];
   for (const { file, project } of transcriptFiles(sinceMs)) {
@@ -198,7 +198,8 @@ async function loadEntries({ sinceMs = 0, toolSink = null, limitEvents = null } 
       const hasUsage = line.includes('"usage"');
       const mayLimit = limitEvents && line.includes('usage limit reached');
       const mayTool = toolSink && line.includes('"tool_'); // tool_use / tool_result
-      if (!hasUsage && !mayLimit && !mayTool) continue;
+      const mayErr = apiErrors && line.includes('"isApiErrorMessage":true');
+      if (!hasUsage && !mayLimit && !mayTool && !mayErr) continue;
       let j;
       try { j = JSON.parse(line); } catch { continue; }
       const ts = Date.parse(j.timestamp);
@@ -212,6 +213,11 @@ async function loadEntries({ sinceMs = 0, toolSink = null, limitEvents = null } 
         }
       }
       if (mayTool) collectTools(toolSink, j, ts);
+      if (mayErr && j.isApiErrorMessage) {
+        const txt = typeof j.message?.content === 'string'
+          ? j.message.content : JSON.stringify(j.message?.content ?? '');
+        apiErrors.push({ ts, text: txt.slice(0, 300) });
+      }
       if (j.type !== 'assistant' || !j.message || !j.message.usage) continue;
       const u = j.message.usage;
       // dedup (ccusage-compatible): message.id+requestId when both exist,
@@ -1282,6 +1288,34 @@ async function cmdHookSessionStart() {
       stateDirty = true;
     }
 
+    // 1b) once-a-week summary of last week (first session of the week)
+    const wkKey = weekStart(today);
+    if (state.last_weekly_key !== wkKey) {
+      const monThis = new Date(); monThis.setHours(0, 0, 0, 0);
+      monThis.setDate(monThis.getDate() - (monThis.getDay() + 6) % 7);
+      const monLast = new Date(monThis); monLast.setDate(monLast.getDate() - 7);
+      const monPrev = new Date(monThis); monPrev.setDate(monPrev.getDate() - 14);
+      const wkEntries = await loadEntries({ sinceMs: monPrev.getTime() });
+      let lastCost = 0, prevCost = 0;
+      const byProj = new Map();
+      for (const e of wkEntries) {
+        if (e.ts >= monLast.getTime() && e.ts < monThis.getTime()) {
+          lastCost += e.cost;
+          byProj.set(e.project, (byProj.get(e.project) || 0) + e.cost);
+        } else if (e.ts >= monPrev.getTime() && e.ts < monLast.getTime()) prevCost += e.cost;
+      }
+      if (lastCost > 0.005) {
+        const top = [...byProj.entries()].sort((a, b) => b[1] - a[1])[0];
+        const delta = prevCost > 0.005
+          ? `（较前周${lastCost >= prevCost ? '↑' : '↓'}${Math.abs(Math.round((lastCost - prevCost) / prevCost * 100))}%）` : '';
+        const end = new Date(monThis); end.setDate(end.getDate() - 1);
+        lines.push(`${emo('📈')}上周（${localDate(monLast.getTime())}～${localDate(end.getTime())}）` +
+          `用量${fmtUSD(lastCost)}${delta}，最费项目${prettyProject(top[0])}`);
+      }
+      state.last_weekly_key = wkKey;
+      stateDirty = true;
+    }
+
     // 2) limit warning when any official window is at/over the threshold
     const rawPct = cfg.limit_warn_pct;
     const warnPct = typeof rawPct === 'number' && Number.isFinite(rawPct)
@@ -1700,6 +1734,35 @@ async function cmdTeam(opts) {
   footnotes();
 }
 
+/** Trim old daily snapshots (and imported device days) beyond a keep window. */
+async function cmdPrune(opts) {
+  const keep = posInt(opts.keep, 365);
+  const cutoff = new Date(); cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - keep);
+  const cutoffStr = localDate(cutoff.getTime());
+  const hf = historyFile();
+  const cur = readJsonObject(hf);
+  if (!cur) {
+    console.log(C.dim('历史仓库为空，无需清理。'));
+    return;
+  }
+  let removed = 0;
+  for (const d of Object.keys(cur.days || {})) {
+    if (d < cutoffStr) { delete cur.days[d]; removed += 1; }
+  }
+  for (const dev of Object.values(cur.devices || {})) {
+    if (!dev || typeof dev.days !== 'object') continue;
+    for (const d of Object.keys(dev.days)) {
+      if (d < cutoffStr) { delete dev.days[d]; removed += 1; }
+    }
+  }
+  if (removed) writeCacheAtomic(hf, cur);
+  if (opts.json) return out({ keep_days: keep, removed_day_entries: removed });
+  console.log(removed
+    ? C.green(`已清理${removed}条早于${cutoffStr}的快照（保留最近${keep}天）。`)
+    : C.dim(`没有早于${cutoffStr}的数据，无需清理。`));
+}
+
 /** Remove one imported device from the history warehouse. */
 async function cmdForget(opts) {
   const dev = opts._[1];
@@ -1867,6 +1930,245 @@ async function cmdCache(opts) {
   console.log(table(rows, { footer: true }));
   console.log('\n' + C.dim('说明：缓存读取按输入价0.1倍计费（省0.9倍）；写入按5分钟档1.25倍、1小时档2倍（溢价部分）。命中率=缓存读÷全部提示token。'));
   footnotes();
+}
+
+// ---------------------------------------------------------------------------
+// API error diagnostics: classify isApiErrorMessage transcript rows.
+// ---------------------------------------------------------------------------
+function classifyApiError(text) {
+  const t = String(text).toLowerCase();
+  if (t.includes('usage limit reached') || /session limit|hit your.*limit|rate.?limit/.test(t)) return '限流';
+  if (/overloaded|529/.test(t)) return '过载';
+  if (/timeout|timed out|etimedout/.test(t)) return '超时';
+  if (/econn|network|fetch failed|socket|eai_again/.test(t)) return '网络';
+  if (/internal server|\b5\d\d\b/.test(t)) return '服务端';
+  if (/\b40[13]\b|auth|credit|billing/.test(t)) return '认证/账务';
+  return '其他';
+}
+
+async function cmdErrors(opts) {
+  const days = posInt(opts.days, 7);
+  const apiErrors = [];
+  await loadEntries({ sinceMs: Date.now() - days * 86400000, apiErrors });
+  const byType = new Map();
+  for (const e of apiErrors) {
+    const k = classifyApiError(e.text);
+    byType.set(k, (byType.get(k) || 0) + 1);
+  }
+  const sorted = [...byType.entries()].sort((a, b) => b[1] - a[1]);
+  if (opts.json) {
+    return out({
+      days, total: apiErrors.length,
+      by_type: Object.fromEntries(sorted),
+      recent: apiErrors.slice(-10).map(e => ({
+        time: new Date(e.ts).toISOString(), type: classifyApiError(e.text), text: e.text.slice(0, 120),
+      })),
+    });
+  }
+  header(`API错误诊断（最近${days}天）`);
+  if (!apiErrors.length) return console.log(C.green('该时间段内没有任何API错误，链路健康。'));
+  const rows = [['类型', '次数', '占比']];
+  for (const [k, n] of sorted) {
+    rows.push([k, String(n), C.dim(Math.round(n / apiErrors.length * 100) + '%')]);
+  }
+  console.log(table(rows));
+  // daily trend sparkline
+  const buckets = Array(days).fill(0);
+  const start = Date.now() - days * 86400000;
+  for (const e of apiErrors) {
+    const i = Math.min(days - 1, Math.floor((e.ts - start) / 86400000));
+    if (i >= 0) buckets[i] += 1;
+  }
+  console.log(`\n${C.bold('按天分布')} ${C.cyan(sparkline(buckets))} ` +
+    C.dim(`共${apiErrors.length}次，最近一次${fmtResetAt(apiErrors[apiErrors.length - 1].ts)}`));
+  console.log('\n' + C.bold('最近5条：'));
+  for (const e of apiErrors.slice(-5)) {
+    console.log(C.dim(`　${fmtResetAt(e.ts)}　`) + C.yellow(`[${classifyApiError(e.text)}]`) +
+      C.dim(` ${e.text.replace(/\s+/g, ' ').slice(0, 70)}`));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Context-size analysis: prompt size (input + cache read + cache write) per
+// request — the dominant cost driver in long agentic sessions.
+// ---------------------------------------------------------------------------
+const ctxOf = u => (u.input_tokens || 0) + (u.cache_read_input_tokens || 0)
+  + (u.cache_creation_input_tokens
+    ?? ((u.cache_creation?.ephemeral_5m_input_tokens || 0) + (u.cache_creation?.ephemeral_1h_input_tokens || 0)));
+
+const CTX_BANDS = [
+  { name: '<50k', lo: 0, hi: 50_000 },
+  { name: '50k~100k', lo: 50_000, hi: 100_000 },
+  { name: '100k~150k', lo: 100_000, hi: 150_000 },
+  { name: '≥150k', lo: 150_000, hi: Infinity },
+];
+
+/** Shared context stats over entries: bands + percentiles + fat sessions. */
+function contextStats(entries) {
+  const sizes = entries.map(e => ctxOf(e.usage)).sort((a, b) => a - b);
+  const pct = q => sizes.length ? sizes[Math.min(sizes.length - 1, Math.floor(q * sizes.length))] : 0;
+  const bands = CTX_BANDS.map(b => ({ ...b, count: 0, cost: 0 }));
+  const bySession = new Map();
+  let totalCost = 0;
+  for (const e of entries) {
+    const c = ctxOf(e.usage);
+    totalCost += e.cost;
+    const band = bands.find(b => c >= b.lo && c < b.hi);
+    if (band) { band.count += 1; band.cost += e.cost; }
+    let s = bySession.get(e.sessionId);
+    if (!s) bySession.set(e.sessionId, s = { project: e.project, maxCtx: 0, cost: 0, count: 0 });
+    s.maxCtx = Math.max(s.maxCtx, c);
+    s.cost += e.cost; s.count += 1;
+  }
+  return {
+    n: sizes.length, totalCost,
+    avg: sizes.length ? sizes.reduce((a, b) => a + b, 0) / sizes.length : 0,
+    p50: pct(0.5), p90: pct(0.9), max: sizes[sizes.length - 1] || 0,
+    bands, bySession,
+  };
+}
+
+async function cmdContext(opts) {
+  const days = posInt(opts.days, 7);
+  const entries = await loadEntries({ sinceMs: Date.now() - days * 86400000 });
+  const st = contextStats(entries);
+  if (opts.json) {
+    return out({
+      days, requests: st.n,
+      avg_tokens: Math.round(st.avg), p50_tokens: st.p50, p90_tokens: st.p90, max_tokens: st.max,
+      bands: st.bands.map(b => ({
+        band: b.name, requests: b.count,
+        cost_usd: +b.cost.toFixed(2),
+        cost_share: +(st.totalCost > 0 ? b.cost / st.totalCost : 0).toFixed(3),
+      })),
+    });
+  }
+  header(`上下文规模分析（最近${days}天）`);
+  if (!st.n) return console.log(C.dim('没有用量记录。'));
+  console.log(`请求数${st.n}　平均${fmtTok(st.avg)}　中位${fmtTok(st.p50)}　` +
+    `P90 ${fmtTok(st.p90)}　最大${C.bold(fmtTok(st.max))}\n`);
+  const rows = [['上下文档位', '请求数', '占比', '成本', '成本占比', '分布']];
+  for (const b of st.bands) {
+    const cShare = st.totalCost > 0 ? b.cost / st.totalCost : 0;
+    const bar = C.cyan('▮'.repeat(Math.max(b.count ? 1 : 0, Math.round(cShare * 14))));
+    rows.push([b.name, String(b.count),
+      C.dim(Math.round(b.count / st.n * 100) + '%'),
+      fmtUSD(b.cost), C.dim(Math.round(cShare * 100) + '%'), bar]);
+  }
+  console.log(table(rows, { aligns: ['l', 'r', 'r', 'r', 'r', 'l'] }));
+  const fat = [...st.bySession.entries()]
+    .sort((a, b) => b[1].maxCtx - a[1].maxCtx).slice(0, 5);
+  console.log('\n' + C.bold('上下文最大的会话Top 5：'));
+  for (const [, s] of fat) {
+    console.log(`　${padEndDW(fitDW(prettyProject(s.project), 24), 24)} ` +
+      `峰值${fmtTok(s.maxCtx).padStart(7)}　${fmtUSD(s.cost).padStart(7)}　${C.dim(s.count + '次请求')}`);
+  }
+  const fatShare = st.totalCost > 0 ? st.bands[3].cost / st.totalCost : 0;
+  if (fatShare >= 0.25) {
+    console.log('\n' + C.yellow(`≥150k上下文的请求花掉了${Math.round(fatShare * 100)}%的成本——` +
+      '长会话勤开新会话或/clear、大文件分段读取，可显著省钱。'));
+  } else {
+    console.log('\n' + C.dim('上下文规模健康，超大上下文成本占比' + Math.round(fatShare * 100) + '%。'));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Advisor: turn cache/context/limit/model-mix data into actionable tips.
+// ---------------------------------------------------------------------------
+async function cmdAdvise(opts) {
+  const days = posInt(opts.days, 14);
+  const now = Date.now();
+  const limitEvents = [];
+  const entries = await loadEntries({ sinceMs: now - days * 86400000, limitEvents });
+  const tips = [];
+
+  if (entries.length) {
+    // 1) cache health per model
+    let save = 0, prem = 0;
+    for (const e of entries) {
+      const pin = inputPriceOf(e.model, e.ts);
+      if (pin == null) continue;
+      const u = e.usage, cc = u.cache_creation;
+      const w5 = cc ? (cc.ephemeral_5m_input_tokens || 0) : (u.cache_creation_input_tokens || 0);
+      const w1 = cc ? (cc.ephemeral_1h_input_tokens || 0) : 0;
+      save += (u.cache_read_input_tokens || 0) * pin * (1 - CACHE_READ) / 1e6;
+      prem += (w5 * (CACHE_WRITE_5M - 1) + w1 * (CACHE_WRITE_1H - 1)) * pin / 1e6;
+    }
+    if (save - prem < 0) {
+      tips.push(['省钱', `缓存整体倒贴${fmtUSD(prem - save)}：会话普遍太短、缓存写入没被复用——同一主题尽量在同一会话里连续做。`]);
+    } else {
+      tips.push(['健康', `缓存净省${fmtUSD(save - prem)}（读省${fmtUSD(save)}－写溢价${fmtUSD(prem)}），复用良好。`]);
+    }
+
+    // 2) context fatness
+    const st = contextStats(entries);
+    const fatShare = st.totalCost > 0 ? st.bands[3].cost / st.totalCost : 0;
+    if (fatShare >= 0.25) {
+      tips.push(['省钱', `≥150k上下文的请求占了${Math.round(fatShare * 100)}%成本（P90=${fmtTok(st.p90)}）——长会话勤开新会话或/clear，细节见context命令。`]);
+    } else {
+      tips.push(['健康', `上下文规模合理（P90=${fmtTok(st.p90)}，超大上下文成本占比${Math.round(fatShare * 100)}%）。`]);
+    }
+
+    // 3) rate-limit hits
+    const hits = limitEvents.length;
+    if (hits > 0) {
+      tips.push(['提醒', `近${days}天触顶限流${hits}次——参考hours命令的高峰时段错峰，或在窗口刷新后安排重活。`]);
+    }
+
+    // 4) model mix
+    const byFamily = { opus: 0, sonnet: 0, haiku: 0, other: 0 };
+    let total = 0;
+    for (const e of entries) {
+      total += e.cost;
+      const m = e.model;
+      if (m.includes('opus') || m.includes('fable') || m.includes('mythos')) byFamily.opus += e.cost;
+      else if (m.includes('sonnet')) byFamily.sonnet += e.cost;
+      else if (m.includes('haiku')) byFamily.haiku += e.cost;
+      else byFamily.other += e.cost;
+    }
+    const opusShare = total > 0 ? byFamily.opus / total : 0;
+    const lightShare = total > 0 ? (byFamily.sonnet + byFamily.haiku) / total : 0;
+    if (opusShare >= 0.7 && lightShare < 0.1) {
+      tips.push(['可选', `${Math.round(opusShare * 100)}%成本来自旗舰模型——格式化、批量改写等轻任务换Sonnet/Haiku可降约1/3～4/5单价（重推理任务不必换）。`]);
+    }
+  } else {
+    tips.push(['提醒', '该时间段没有用量记录。']);
+  }
+
+  // 5) subscription value (calendar month)
+  const subUsd = Number(userConfig().subscription_usd_per_month);
+  if (Number.isFinite(subUsd) && subUsd > 0) {
+    const mStart = new Date(); mStart.setHours(0, 0, 0, 0); mStart.setDate(1);
+    const mtdEntries = await loadEntries({ sinceMs: mStart.getTime() });
+    const mtd = mtdEntries.reduce((s, e) => s + e.cost, 0);
+    const mult = mtd / subUsd;
+    tips.push([mult >= 1.5 ? '健康' : '提醒',
+      `本月等价API价值${fmtUSD(mtd)}＝订阅费的${mult >= 10 ? Math.round(mult) : mult.toFixed(1)}倍` +
+      (mult < 1.5 ? '——用量较低，留意订阅档位是否偏高。' : '，订阅回本充分。')]);
+  }
+
+  if (opts.json) return out({ days, tips: tips.map(([level, text]) => ({ level, text })) });
+  header(`用量优化建议（基于最近${days}天数据）`);
+  const badge = l => l === '省钱' ? C.yellow('省钱') : l === '提醒' ? C.red('提醒')
+    : l === '可选' ? C.cyan('可选') : C.green('健康');
+  tips.forEach(([level, text], i) => {
+    console.log(`${C.dim(String(i + 1) + '.')} ${badge(level)}　${text}`);
+  });
+  console.log('\n' + C.dim('依据命令：cache（缓存）、context（上下文）、hours（高峰）、blocks（触顶）、models（模型分布）。'));
+}
+
+// ---------------------------------------------------------------------------
+// Live dashboard: clear + redraw the all-in-one view on an interval.
+// ---------------------------------------------------------------------------
+async function cmdLive(opts) {
+  const sec = Math.max(10, posInt(opts.interval, 30));
+  for (;;) {
+    process.stdout.write('\x1b[2J\x1b[3J\x1b[H'); // clear screen + scrollback
+    console.log(C.dim(`live模式　每${sec}秒刷新　Ctrl+C退出　` +
+      new Date().toLocaleTimeString('zh-CN', { hour12: false })) + '\n');
+    try { await cmdAll({}); } catch (e) { console.log(C.red(`刷新失败：${e?.message || e}`)); }
+    await new Promise(r => setTimeout(r, sec * 1000));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2267,7 +2569,7 @@ async function cmdAll(opts) {
 // ---------------------------------------------------------------------------
 function parseArgs(argv) {
   const opts = { _: [] };
-  const num = ['days', 'top', 'weeks', 'months'];
+  const num = ['days', 'top', 'weeks', 'months', 'interval', 'keep'];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--json') { opts.json = true; continue; }
@@ -2303,7 +2605,12 @@ const HELP = `claude-usage-monitor — Claude Code 用量统计
   blocks           5小时限额窗口      --days N（默认3，滚动窗口）
   models           按模型汇总          --days N（省略=全部历史）
   hours            用量热力：星期×小时高峰分析  --days N（默认30）
+  context          上下文规模分析：档位分布/成本占比/最肥会话  --days N（默认7）
+  advise           用量优化建议（缓存/上下文/触顶/模型组合/订阅性价比）
+  errors           API错误诊断：限流/过载/超时/网络分类统计  --days N（默认7）
+  live             实时仪表盘（终端常驻，--interval 秒，默认30，Ctrl+C退出）
   doctor           环境自检：版本/配置/数据源/钩子/同步逐项体检
+  prune            清理历史仓库  --keep N（保留最近N天，默认365）
   sessions         会话成本排行       --top N（默认10）--days N
   projects         按项目统计         --days N（默认30）--top N
   cache            缓存效率与节省      --days N（默认30）
@@ -2343,6 +2650,8 @@ async function main() {
     report: cmdReport, statusline: cmdStatusline,
     export: cmdExport, import: cmdImport, sync: cmdSync, team: cmdTeam, forget: cmdForget,
     hours: cmdHours, doctor: cmdDoctor,
+    context: cmdContext, advise: cmdAdvise, errors: cmdErrors,
+    live: cmdLive, prune: cmdPrune,
     'hook-session-start': cmdHookSessionStart,
   };
   const fn = commands[cmd];

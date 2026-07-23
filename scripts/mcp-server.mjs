@@ -42,6 +42,12 @@ const TOOLS = [
     description: '用量热力：星期×小时的成本分布矩阵，找高峰时段（days默认30）' },
   { name: 'usage_doctor', cmd: ['doctor'], args: [],
     description: '插件环境自检：版本一致性、配置合法性、数据源、凭据、钩子、同步目录' },
+  { name: 'usage_context', cmd: ['context'], args: ['days'],
+    description: '上下文规模分析：各档位请求数与成本占比、百分位（days默认7）' },
+  { name: 'usage_advise', cmd: ['advise'], args: ['days'],
+    description: '用量优化建议：缓存健康、上下文肥胖、触顶、模型组合、订阅性价比（days默认14）' },
+  { name: 'usage_errors', cmd: ['errors'], args: ['days'],
+    description: 'API错误分类统计：限流/过载/超时/网络/认证（days默认7）' },
 ];
 
 function schemaFor(t) {

@@ -68,6 +68,9 @@ claude --plugin-dir ./claude-usage-monitor
 | `/usage-monitor:cache` | 缓存效率与节省金额 |
 | `/usage-monitor:tools [天数]` | 工具调用统计，默认7天 |
 | `/usage-monitor:hours [天数]` | 星期×小时用量热力，找高峰时段 |
+| `/usage-monitor:context [天数]` | 上下文规模分析：成本花在哪个档位、最肥会话 |
+| `/usage-monitor:advise` | 个性化省钱建议（缓存/上下文/触顶/模型组合） |
+| `/usage-monitor:errors [天数]` | API错误分类诊断（限流/过载/超时/网络） |
 | `/usage-monitor:doctor` | 环境自检：版本/配置/数据源/钩子逐项体检 |
 | `/usage-monitor:limits` | 官方限额利用率与刷新时间 |
 | `/usage-monitor:report [天数]` | 生成HTML可视化报告并打开 |
@@ -86,6 +89,8 @@ node scripts/usage.mjs tools --days 7 --top 20
 node scripts/usage.mjs report --days 30
 node scripts/usage.mjs daily --days 14 --json
 node scripts/usage.mjs limits --check; echo $?   # 0正常/10接近/11已达/1失败
+node scripts/usage.mjs live --interval 30        # 终端常驻实时仪表盘（Ctrl+C退出）
+node scripts/usage.mjs prune --keep 365          # 清理一年前的历史快照
 ```
 
 时间口径：daily/weekly/monthly按本地自然日统计；blocks/sessions/projects/tools按当前时刻回溯N×24小时。窄终端（低于100列）自动切换紧凑列，`--compact`强制开启、`--wide`强制关闭。
