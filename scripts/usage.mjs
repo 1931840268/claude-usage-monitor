@@ -345,10 +345,21 @@ const C = {
 };
 
 const stripAnsi = s => String(s).replace(/\x1b\[[0-9;]*m/g, '');
-// CJK/fullwidth chars, emoji, and common wide symbols occupy 2 terminal columns
-const WIDE = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦⏩-⏺☀-➿⬀-⯿🌀-🫿◆◇●○…—]/u;
+// CJK/fullwidth chars and emoji occupy 2 terminal columns everywhere.
+const WIDE = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦⏩-⏺☀-➿⬀-⯿\u{1F300}-\u{1FAFF}]/u;
+// Ambiguous-width symbols: modern terminals (Windows Terminal / VS Code)
+// render them 1 column, legacy CJK consoles render 2. Default 1; set
+// {"display": {"ambiguous_wide": true}} in usage-monitor.json for legacy.
+const AMBIG = /[◆◇●○◂▮…—]/u;
+let _ambigW = null;
+const ambigWidth = () => {
+  if (_ambigW == null) {
+    _ambigW = userConfig().display?.ambiguous_wide === true ? 2 : 1;
+  }
+  return _ambigW;
+};
 const dw = s => [...stripAnsi(s)].reduce((w, ch) =>
-  w + (ch === '️' ? 0 : WIDE.test(ch) ? 2 : 1), 0);
+  w + (/\uFE0F/.test(ch) ? 0 : WIDE.test(ch) ? 2 : AMBIG.test(ch) ? ambigWidth() : 1), 0);
 const padEndDW = (s, n) => s + ' '.repeat(Math.max(0, n - dw(s)));
 
 /** Truncate to a display width, keeping the (more informative) tail. */
@@ -683,8 +694,10 @@ async function cmdBlocks(opts) {
     const label = `${localDate(b.startMs)} ${fmtLocal(b.startMs)}~${fmtLocal(b.endMs)}`;
     const dur = fmtDuration((b.active ? now : b.lastTs) - b.startMs);
     const hit = b.limitHits.length > 0;
-    const status = hit ? C.red(`🚫 触顶(${dur})`)
-      : b.active ? C.green(`⏰ 进行中(${dur})`) : C.dim(`✅ ${dur}`);
+    // plain colored text only — emoji inside table cells overflow their
+    // measured width on some Windows terminals and break the borders
+    const status = hit ? C.red(`触顶(${dur})`)
+      : b.active ? C.green(`进行中(${dur})`) : C.dim(`已结束 ${dur}`);
     // an official hit carries the authoritative reset time — prefer it
     const hitReset = hit ? b.limitHits[b.limitHits.length - 1].resetTs : NaN;
     const reset = hit && Number.isFinite(hitReset)
@@ -1118,7 +1131,7 @@ async function renderStatusline() {
       if (!Number.isFinite(budget) || budget <= 0) return null;
       const pct = Math.round(local.todayCost / budget * 100);
       if (pct < 80) return null;
-      return col(pct)(`${pct >= 100 ? '🚨超预算' : '⚠预算'}${pct}%`);
+      return col(pct)(`${pct >= 100 ? '🚨 超预算' : '⚠ 预算'}${pct}%`);
     },
     '5h'() {
       // official rate_limits first, local block estimate as fallback
@@ -1168,7 +1181,7 @@ async function renderStatusline() {
       const rate = pct / elapsedMin;
       if (!(rate > 0)) return null;
       const etaTs = now + (100 - pct) / rate * 60000;
-      return etaTs < t ? C.red(`⚠触顶约${fmtLocal(etaTs)}`) : null;
+      return etaTs < t ? C.red(`⚠ 触顶约${fmtLocal(etaTs)}`) : null;
     },
   };
 

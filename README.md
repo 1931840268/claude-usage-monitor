@@ -118,6 +118,7 @@ Fable 5(xhigh) | 💰 会话$3.21 / 今日$142 / 窗口$139 | 5h 63% 剩2h05m(18
 - `statusline.segments`：从model/cost/budget/5h/7d/ctx/burn/eta中挑选要显示的段，顺序即显示顺序；省略或留空显示全部（eta段仅在预计刷新前触顶时出现红色「⚠触顶约HH:MM」）。
 - `statusline.separator`：段间分隔符，默认`" | "`。
 - `statusline.warn_pct`/`danger_pct`：百分比着色阈值（达到warn变黄、达到danger变红），默认50/80；非法值自动回退。
+- `display.ambiguous_wide`：若你的终端是老式CJK控制台（`…◆`等符号占2列）且表格出现错位，设为`true`；现代终端（Windows Terminal/VS Code）保持默认即可。
 
 ## 会话启动钩子
 
