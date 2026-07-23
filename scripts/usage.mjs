@@ -684,6 +684,9 @@ async function sessionTitle(file, maxLen = 40) {
         .replace(/<local-command[\s\S]*?<\/local-command[^>]*>/g, ' ')
         .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, ' ')
         .replace(/<[^>]{1,60}>/g, ' ')
+        // user text may carry emoji / control chars — they break table cells
+        // on emoji-overflow terminals, so titles are always plain text
+        .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2300}-\u{23FF}\u{FE0F}\u{200D}\x00-\x1f]/gu, '')
         .replace(/\s+/g, ' ').trim();
       if (!text || text.startsWith('Caveat:')
         || text.startsWith('This session is being continued')) continue;
@@ -2424,7 +2427,7 @@ async function cmdPlan(opts) {
     const busy = prof[h] >= p75 && prof[h] > 0;
     strip += hasReset ? C.yellow('R') : busy ? C.cyan('▓') : prof[h] > 0 ? '░' : C.dim('·');
   }
-  console.log(C.dim('时刻  ') + C.dim(labels));
+  console.log(C.dim('时刻   ') + C.dim(labels)); // 7-col prefix, matches下行
   console.log('时间轴 ' + strip + C.dim('　（R=5小时窗口刷新　▓=你的历史高峰时段）'));
   console.log('');
   if (l5) {
