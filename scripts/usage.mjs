@@ -163,8 +163,23 @@ function collectTools(sink, j, ts = 0) {
   for (const c of content) {
     if (c?.type === 'tool_use' && c.id && !sink.seenIds.has(c.id)) {
       sink.seenIds.add(c.id);
-      sink.idName.set(c.id, c.name || '(未知)');
-      if (ts >= since) recOf(c.name || '(未知)').count += 1;
+      const name = c.name || '(未知)';
+      sink.idName.set(c.id, name);
+      if (ts >= since) {
+        recOf(name).count += 1;
+        // optional per-session ROI accounting (edit ops + touched files)
+        if (sink.perSession) {
+          const sid = j.sessionId || '?';
+          let ps = sink.perSession.get(sid);
+          if (!ps) sink.perSession.set(sid, ps = { ops: 0, edits: 0, files: new Map() });
+          ps.ops += 1;
+          if ((name === 'Edit' || name === 'Write' || name === 'NotebookEdit')
+              && typeof c.input?.file_path === 'string') {
+            ps.edits += 1;
+            ps.files.set(c.input.file_path, (ps.files.get(c.input.file_path) || 0) + 1);
+          }
+        }
+      }
     } else if (c?.type === 'tool_result' && c.is_error && c.tool_use_id
         && ts >= since && !sink.errSeen.has(c.tool_use_id)) {
       sink.errSeen.add(c.tool_use_id);
@@ -643,6 +658,49 @@ async function cmdModels(opts) {
   footnotes();
 }
 
+/**
+ * Best-effort task title for a session: the first real user message
+ * (skipping slash-command scaffolding and system reminders), compressed.
+ */
+async function sessionTitle(file, maxLen = 40) {
+  try {
+    const rl = readline.createInterface({
+      input: fs.createReadStream(file, { encoding: 'utf8' }),
+      crlfDelay: Infinity,
+    });
+    let scanned = 0;
+    for await (const line of rl) {
+      if (++scanned > 120) break;
+      if (!line.includes('"type":"user"')) continue;
+      let j;
+      try { j = JSON.parse(line); } catch { continue; }
+      if (j.type !== 'user' || j.isMeta) continue;
+      const c = j.message?.content;
+      let text = typeof c === 'string' ? c
+        : Array.isArray(c) ? c.filter(x => x?.type === 'text').map(x => x.text).join(' ') : '';
+      if (!text) continue;
+      // strip command scaffolding / reminders, keep the human ask
+      text = text.replace(/<command-[^>]*>[\s\S]*?<\/command-[^>]*>/g, ' ')
+        .replace(/<local-command[\s\S]*?<\/local-command[^>]*>/g, ' ')
+        .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, ' ')
+        .replace(/<[^>]{1,60}>/g, ' ')
+        .replace(/\s+/g, ' ').trim();
+      if (!text || text.startsWith('Caveat:')
+        || text.startsWith('This session is being continued')) continue;
+      rl.close();
+      // head-truncate to display width (the ask's beginning carries the intent)
+      let outStr = '', acc = 0;
+      for (const ch of text) {
+        const cw = dw(ch);
+        if (acc + cw > maxLen - 1) { outStr += '…'; break; }
+        outStr += ch; acc += cw;
+      }
+      return outStr || null;
+    }
+  } catch { /* unreadable */ }
+  return null;
+}
+
 async function cmdSessions(opts) {
   const top = posInt(opts.top, 10);
   const days = posInt(opts.days, 0);
@@ -658,28 +716,36 @@ async function cmdSessions(opts) {
     s.lastTs = Math.max(s.lastTs, e.ts);
   }
   const sorted = [...bySession.entries()].sort((a, b) => b[1].agg.cost - a[1].agg.cost).slice(0, top);
+  // resolve transcript file per session to extract a human task title
+  const fileOf = new Map();
+  for (const f of transcriptFiles(sinceMs)) fileOf.set(path.basename(f.file, '.jsonl'), f.file);
+  const titleW = COMPACT ? 22 : 34;
+  const titles = new Map();
+  for (const [id] of sorted) {
+    const f = fileOf.get(id);
+    titles.set(id, f ? await sessionTitle(f, titleW) : null);
+  }
   const flat = () => sorted.map(([id, s]) => ({
-    session_id: id, project: s.project,
+    session_id: id, title: titles.get(id) || null, project: s.project,
     start: new Date(s.firstTs).toISOString(), end: new Date(s.lastTs).toISOString(),
     ...aggJson(s.agg),
   }));
   if (opts.csv) return outCsv(flat());
   if (opts.json) return out(flat());
   header(`会话排行 Top ${sorted.length}（按成本）`);
-  const projW = COMPACT ? 18 : 30;
   const rows = [COMPACT
-    ? ['日期', '项目', '成本', '时长']
-    : ['日期', '项目', '输入', '输出', '成本', '时长', '请求数']];
-  for (const [, s] of sorted) {
+    ? ['日期', '任务', '成本', '时长']
+    : ['日期', '任务', '项目', '成本', '时长', '请求数']];
+  for (const [id, s] of sorted) {
     const dur = C.dim(fmtDuration(s.lastTs - s.firstTs));
-    const proj = fitDW(prettyProject(s.project), projW);
+    const title = titles.get(id) || C.dim('（无标题）');
+    const proj = fitDW(prettyProject(s.project), 16);
     rows.push(COMPACT
-      ? [localDate(s.firstTs), proj, fmtUSD(s.agg.cost), dur]
-      : [localDate(s.firstTs), proj, fmtTok(s.agg.input),
-        fmtTok(s.agg.output), fmtUSD(s.agg.cost), dur, String(s.agg.count)]);
+      ? [localDate(s.firstTs), title, fmtUSD(s.agg.cost), dur]
+      : [localDate(s.firstTs), title, proj, fmtUSD(s.agg.cost), dur, String(s.agg.count)]);
   }
   console.log(sorted.length
-    ? table(rows, { aligns: COMPACT ? ['l', 'l', 'r', 'r'] : ['l', 'l', 'r', 'r', 'r', 'r', 'r'] })
+    ? table(rows, { aligns: COMPACT ? ['l', 'l', 'r', 'r'] : ['l', 'l', 'l', 'r', 'r', 'r'] })
     : C.dim('没有会话记录。'));
   footnotes();
 }
@@ -1060,10 +1126,15 @@ async function localStatus() {
   const entries = await loadEntries({ sinceMs });
   const todayCost = entries.reduce((s, e) => s + (e.ts >= midnight.getTime() ? e.cost : 0), 0);
   const weekCost = entries.reduce((s, e) => s + (e.ts >= mon.getTime() ? e.cost : 0), 0);
-  const active = computeBlocks(entries).find(b => b.active);
+  const blocks = computeBlocks(entries);
+  const active = blocks.find(b => b.active);
+  // personal burn baseline: P90 of this week's window burn rates
+  const burns = blocks.map(b => b.tokensPerMin).filter(v => Number.isFinite(v)).sort((a, b) => a - b);
+  const burnP90 = burns.length >= 3 ? burns[Math.floor(burns.length * 0.9)] : null;
   const status = {
     todayCost,
     weekCost,
+    burnP90,
     block: active
       ? {
           startMs: active.startMs,
@@ -1209,6 +1280,11 @@ async function renderStatusline() {
     burn() {
       if (!local.block || !(local.block.tokensPerMin > 0)) return null;
       const tpm = local.block.tokensPerMin;
+      // anomaly sentinel: current burn far above your own P90 baseline
+      // (runaway multi-agent loops show up here within a minute)
+      if (Number.isFinite(local.burnP90) && tpm >= Math.max(5000, local.burnP90 * 1.5)) {
+        return C.red(`燃烧异常${fmtTok(tpm)}/min`);
+      }
       const paintBy = tpm >= 5000 ? C.red : tpm >= 2000 ? C.yellow : C.dim;
       return paintBy(`${fmtTok(tpm)}tok/min`);
     },
@@ -1314,6 +1390,14 @@ async function cmdHookSessionStart() {
       }
       state.last_weekly_key = wkKey;
       stateDirty = true;
+      // archive last week's HTML report in the background (detached child)
+      try {
+        const outDir = path.join(configHomes()[0], 'usage-monitor', 'weekly');
+        fs.mkdirSync(outDir, { recursive: true });
+        spawn(process.execPath, [fileURLToPath(import.meta.url), 'report', '--days', '7',
+          '--no-open', '--out', path.join(outDir, `weekly-${wkKey}.html`)],
+          { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+      } catch { /* best effort */ }
     }
 
     // 2) limit warning when any official window is at/over the threshold
@@ -1933,6 +2017,68 @@ async function cmdCache(opts) {
 }
 
 // ---------------------------------------------------------------------------
+// ROI: what did each dollar buy — actions per $, edit ops, rework rate
+// (same file edited repeatedly = churn signal).
+// ---------------------------------------------------------------------------
+async function cmdRoi(opts) {
+  const days = posInt(opts.days, 7);
+  const top = posInt(opts.top, 10);
+  const sinceMs = Date.now() - days * 86400000;
+  const toolSink = newToolSink();
+  toolSink.sinceMs = sinceMs;
+  toolSink.perSession = new Map();
+  const entries = await loadEntries({ sinceMs, toolSink });
+  const cost = new Map();
+  const meta = new Map();
+  for (const e of entries) {
+    cost.set(e.sessionId, (cost.get(e.sessionId) || 0) + e.cost);
+    if (!meta.has(e.sessionId)) meta.set(e.sessionId, { project: e.project, firstTs: e.ts });
+  }
+  const rows = [];
+  for (const [sid, c] of cost) {
+    const ps = toolSink.perSession.get(sid) || { ops: 0, edits: 0, files: new Map() };
+    const uniq = ps.files.size;
+    rows.push({
+      sid, cost: c, ops: ps.ops, edits: ps.edits, uniq,
+      rework: ps.edits > 0 ? 1 - uniq / ps.edits : 0,
+      opsPerUsd: c > 0.01 ? ps.ops / c : 0,
+      ...meta.get(sid),
+    });
+  }
+  rows.sort((a, b) => b.cost - a.cost);
+  const shown = rows.slice(0, top);
+  if (opts.json || opts.csv) {
+    const flat = shown.map(r => ({
+      session_id: r.sid, project: r.project, cost_usd: +r.cost.toFixed(2),
+      tool_ops: r.ops, edit_ops: r.edits, files_touched: r.uniq,
+      rework_rate: +r.rework.toFixed(3), ops_per_usd: +r.opsPerUsd.toFixed(2),
+    }));
+    return opts.csv ? outCsv(flat) : out(flat);
+  }
+  header(`效率分析ROI（最近${days}天，按成本Top ${shown.length}）`);
+  if (!shown.length) return console.log(C.dim('没有会话记录。'));
+  const fileOf = new Map();
+  for (const f of transcriptFiles(sinceMs)) fileOf.set(path.basename(f.file, '.jsonl'), f.file);
+  const t = [['任务', '成本', '动作', '每$动作', '编辑', '文件数', '返工率']];
+  for (const r of shown) {
+    const f = fileOf.get(r.sid);
+    const title = (f && await sessionTitle(f, 26)) || C.dim(fitDW(prettyProject(r.project), 16));
+    const reworkCell = r.edits >= 5 && r.rework >= 0.5
+      ? C.yellow(Math.round(r.rework * 100) + '%')
+      : C.dim(r.edits ? Math.round(r.rework * 100) + '%' : '—');
+    t.push([title, fmtUSD(r.cost), String(r.ops),
+      r.opsPerUsd ? r.opsPerUsd.toFixed(1) : C.dim('—'),
+      String(r.edits), String(r.uniq), reworkCell]);
+  }
+  console.log(table(t, { aligns: ['l', 'r', 'r', 'r', 'r', 'r', 'r'] }));
+  const totC = rows.reduce((s, r) => s + r.cost, 0);
+  const totOps = rows.reduce((s, r) => s + r.ops, 0);
+  console.log('\n' + C.dim(`全部${rows.length}个会话：${fmtUSD(totC)}换来${totOps}次工具动作` +
+    `（平均每$1约${(totOps / Math.max(0.01, totC)).toFixed(1)}次）。` +
+    '返工率=对同一文件的重复编辑占比，黄色标注值得复盘（需求没说清或方案反复）。'));
+}
+
+// ---------------------------------------------------------------------------
 // API error diagnostics: classify isApiErrorMessage transcript rows.
 // ---------------------------------------------------------------------------
 function classifyApiError(text) {
@@ -2168,6 +2314,139 @@ async function cmdLive(opts) {
       new Date().toLocaleTimeString('zh-CN', { hour12: false })) + '\n');
     try { await cmdAll({}); } catch (e) { console.log(C.red(`刷新失败：${e?.message || e}`)); }
     await new Promise(r => setTimeout(r, sec * 1000));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shareable monthly usage card (self-contained SVG, no data leaves the file).
+// ---------------------------------------------------------------------------
+async function cmdCard(opts) {
+  const now = new Date();
+  const mStart = new Date(now); mStart.setHours(0, 0, 0, 0); mStart.setDate(1);
+  const entries = await loadEntries({ sinceMs: mStart.getTime() });
+  const cost = entries.reduce((s, e) => s + e.cost, 0);
+  const outTok = entries.reduce((s, e) => s + (e.usage.output_tokens || 0), 0);
+  const byDay = new Map();
+  const heat = Array.from({ length: 7 }, () => Array(24).fill(0));
+  for (const e of entries) {
+    const d = localDate(e.ts);
+    byDay.set(d, (byDay.get(d) || 0) + e.cost);
+    const dt = new Date(e.ts);
+    heat[(dt.getDay() + 6) % 7][dt.getHours()] += e.cost;
+  }
+  const topDay = [...byDay.entries()].sort((a, b) => b[1] - a[1])[0];
+  const subUsd = Number(userConfig().subscription_usd_per_month);
+  const mult = Number.isFinite(subUsd) && subUsd > 0 ? cost / subUsd : null;
+  const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  const maxH = Math.max(1e-9, ...heat.flat());
+  let cells = '';
+  heat.forEach((row, d) => row.forEach((v, h) => {
+    if (v <= 0) return;
+    const op = 0.25 + 0.75 * Math.min(1, v / maxH);
+    cells += `<rect x="${370 + h * 10}" y="${210 + d * 12}" width="8" height="10" rx="2" fill="#3987e5" opacity="${op.toFixed(2)}"/>`;
+  }));
+  const fmt = n => n >= 100 ? '$' + Math.round(n).toLocaleString('en-US') : '$' + n.toFixed(2);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 320" font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">
+<rect width="640" height="320" rx="16" fill="#0d1220"/>
+<text x="32" y="52" fill="#8ea0c0" font-size="15">Claude Code 用量月卡</text>
+<text x="608" y="52" fill="#5a6b8a" font-size="15" text-anchor="end">${ym}</text>
+<text x="32" y="118" fill="#ffffff" font-size="46" font-weight="700">${esc(fmt(cost))}</text>
+<text x="32" y="146" fill="#8ea0c0" font-size="14">等价API价值${mult != null ? `　·　订阅费的${mult >= 10 ? Math.round(mult) : mult.toFixed(1)}倍` : ''}</text>
+<text x="32" y="196" fill="#c8d4e8" font-size="14">输出token　<tspan fill="#ffffff" font-weight="600">${fmtTok(outTok)}</tspan></text>
+<text x="32" y="222" fill="#c8d4e8" font-size="14">最高单日　<tspan fill="#ffffff" font-weight="600">${topDay ? esc(topDay[0].slice(5) + ' ' + fmt(topDay[1])) : '—'}</tspan></text>
+<text x="32" y="248" fill="#c8d4e8" font-size="14">活跃天数　<tspan fill="#ffffff" font-weight="600">${byDay.size}天</tspan></text>
+<text x="370" y="196" fill="#8ea0c0" font-size="12">星期×小时热力</text>
+${cells}
+<text x="32" y="296" fill="#5a6b8a" font-size="12">github.com/1931840268/claude-usage-monitor</text>
+</svg>`;
+  const outPath = opts.out ||
+    path.join(configHomes()[0], 'usage-monitor', `card-${ym}.svg`);
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  fs.writeFileSync(outPath, svg, 'utf8');
+  if (opts.json) return out({ file: outPath, month: ym, cost_usd: +cost.toFixed(2) });
+  console.log(C.green(`月度用量卡片已生成：${outPath}`));
+  if (!opts.noOpen) {
+    try {
+      spawn('cmd', ['/c', 'start', '', outPath], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+    } catch { console.log(C.dim('请手动打开上述SVG文件查看。')); }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Plan: next-24h timeline — official reset moments overlaid on your own
+// historical hourly load, so heavy work lands right after a refresh.
+// ---------------------------------------------------------------------------
+async function cmdPlan(opts) {
+  const now = Date.now();
+  const [entries, official] = await Promise.all([
+    loadEntries({ sinceMs: now - 28 * 86400000 }),
+    fetchOfficialUsage(),
+  ]);
+  // hourly cost profile for today's weekday (4 weeks of history)
+  const dow = (new Date().getDay() + 6) % 7;
+  const prof = Array(24).fill(0);
+  for (const e of entries) {
+    const d = new Date(e.ts);
+    if ((d.getDay() + 6) % 7 === dow) prof[d.getHours()] += e.cost;
+  }
+  const nz = prof.filter(v => v > 0).sort((a, b) => a - b);
+  const p75 = nz.length ? nz[Math.floor(nz.length * 0.75)] : Infinity;
+
+  // upcoming 5h resets (rolling every BLOCK from the official reset moment)
+  const lims = limitEntries(official.error ? {} : official);
+  const l5 = lims.find(x => x.fiveHour);
+  const resets5 = [];
+  if (l5 && Number.isFinite(l5.resetTs)) {
+    for (let t = l5.resetTs; t < now + 24 * 3600000; t += BLOCK_MS) {
+      if (t > now) resets5.push(t);
+    }
+  }
+  const weekly = lims.filter(x => !x.fiveHour && Number.isFinite(x.resetTs)
+    && x.resetTs > now && x.resetTs < now + 24 * 3600000);
+
+  if (opts.json) {
+    return out({
+      now: new Date(now).toISOString(),
+      five_hour_resets: resets5.map(t => new Date(t).toISOString()),
+      weekly_resets: weekly.map(w => ({ name: w.name, at: new Date(w.resetTs).toISOString() })),
+      weekday_hour_profile_usd: prof.map(v => +v.toFixed(2)),
+    });
+  }
+  header('未来24小时限额规划');
+  const hour0 = Math.floor(now / 3600000) * 3600000;
+  let labels = '', strip = '';
+  for (let i = 0; i < 24; i++) {
+    const ts = hour0 + i * 3600000;
+    const h = new Date(ts).getHours();
+    labels += i % 3 === 0 ? String(h).padStart(2, '0') + ' ' : '';
+    const hasReset = resets5.some(t => t >= ts && t < ts + 3600000);
+    const busy = prof[h] >= p75 && prof[h] > 0;
+    strip += hasReset ? C.yellow('R') : busy ? C.cyan('▓') : prof[h] > 0 ? '░' : C.dim('·');
+  }
+  console.log(C.dim('时刻  ') + C.dim(labels));
+  console.log('时间轴 ' + strip + C.dim('　（R=5小时窗口刷新　▓=你的历史高峰时段）'));
+  console.log('');
+  if (l5) {
+    const pctTxt = Number.isFinite(l5.pct) ? `当前已用${Math.round(l5.pct)}%，` : '';
+    console.log(`5小时窗口：${pctTxt}` + (resets5.length
+      ? `下次刷新${C.yellow(fmtResetAt(resets5[0]))}（剩${fmtDuration(resets5[0] - now)}）`
+      : C.dim('刷新时间未知')));
+  } else {
+    console.log(C.dim('未获取到官方5小时窗口（API Key用户可参考blocks的本地估算）。'));
+  }
+  for (const w of weekly) {
+    console.log(`${w.name}：已用${Math.round(w.pct)}%，${C.yellow(fmtResetAt(w.resetTs))}刷新（未来24小时内）`);
+  }
+  const peaks = prof.map((v, h) => [h, v]).filter(([, v]) => v >= p75 && v > 0)
+    .sort((a, b) => b[1] - a[1]).slice(0, 3).map(([h]) => `${h}:00`);
+  if (peaks.length) console.log(`今天（周${'一二三四五六日'[dow]}）的历史高峰时段：${peaks.join('、')}`);
+  if (l5 && Number.isFinite(l5.pct) && l5.pct >= 60 && resets5.length) {
+    console.log('\n' + C.yellow(`建议：额度已用${Math.round(l5.pct)}%，重活安排到${fmtLocal(resets5[0])}刷新之后；` +
+      '刷新前适合做规划、审阅等轻交互。'));
+  } else if (peaks.length && resets5.length) {
+    console.log('\n' + C.dim(`建议：在刷新点（${resets5.slice(0, 2).map(fmtLocal).join('、')}）之后开始高强度任务，` +
+      '让整个5小时窗口都落在你的高产时段里。'));
   }
 }
 
@@ -2606,6 +2885,9 @@ const HELP = `claude-usage-monitor — Claude Code 用量统计
   models           按模型汇总          --days N（省略=全部历史）
   hours            用量热力：星期×小时高峰分析  --days N（默认30）
   context          上下文规模分析：档位分布/成本占比/最肥会话  --days N（默认7）
+  roi              效率分析：每$动作数/编辑数/返工率  --days N（默认7）--top N
+  plan             未来24小时限额规划（刷新时刻×历史高峰时间轴）
+  card             生成月度用量分享卡片（SVG）  --out 路径 --no-open
   advise           用量优化建议（缓存/上下文/触顶/模型组合/订阅性价比）
   errors           API错误诊断：限流/过载/超时/网络分类统计  --days N（默认7）
   live             实时仪表盘（终端常驻，--interval 秒，默认30，Ctrl+C退出）
@@ -2651,6 +2933,7 @@ async function main() {
     export: cmdExport, import: cmdImport, sync: cmdSync, team: cmdTeam, forget: cmdForget,
     hours: cmdHours, doctor: cmdDoctor,
     context: cmdContext, advise: cmdAdvise, errors: cmdErrors,
+    roi: cmdRoi, plan: cmdPlan, card: cmdCard,
     live: cmdLive, prune: cmdPrune,
     'hook-session-start': cmdHookSessionStart,
   };

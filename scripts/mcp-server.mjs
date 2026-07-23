@@ -55,6 +55,10 @@ const TOOLS = [
     description: '用量优化建议：缓存健康、上下文肥胖、触顶、模型组合、订阅性价比（days默认14）' },
   { name: 'usage_errors', cmd: ['errors'], args: ['days'],
     description: 'API错误分类统计：限流/过载/超时/网络/认证（days默认7）' },
+  { name: 'usage_roi', cmd: ['roi'], args: ['days', 'top'],
+    description: '效率分析：每会话的每$动作数、编辑量、返工率（days默认7）' },
+  { name: 'usage_plan', cmd: ['plan'], args: [],
+    description: '未来24小时限额规划：5小时/7天刷新时刻与历史小时负载画像' },
 ];
 
 function schemaFor(t) {

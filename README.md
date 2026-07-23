@@ -4,6 +4,20 @@
 
 设计参考了ccusage（17k星）、Claude Code Usage Monitor（8.5k星）、ccstatusline、claude-powerline等主流开源工具，并与ccusage的5小时窗口算法保持一致；官方限额数据直接来自Anthropic接口，非估算值。
 
+## 为什么选它（与通用记账CLI的差异）
+
+| 能力 | 本插件 | 传统用量CLI |
+| --- | --- | --- |
+| 插件原生：斜杠命令、会话钩子、MCP工具随会话即用 | ✓ | 需另开终端 |
+| 任务级归因：会话排行显示「你让它干了什么」而非UUID | ✓ | 只有ID |
+| ROI效率分析：每$产出动作数、返工率 | ✓ | 无 |
+| 上下文肥胖诊断＋个性化省钱建议引擎 | ✓ | 无 |
+| 限额规划：未来24h刷新×历史高峰时间轴、触顶预测、异常燃烧哨兵 | ✓ | 部分 |
+| 多设备自动同步＋团队视图 | ✓ | 无 |
+| 自动日报/周报（周报HTML自动存档） | ✓ | 无 |
+| 月度用量分享卡片（SVG） | ✓ | 无 |
+| 中文完整体验、纯文字防遮挡模式、零依赖 | ✓ | 英文为主 |
+
 ## 功能特性
 
 | 功能 | 说明 |
@@ -69,6 +83,9 @@ claude --plugin-dir ./claude-usage-monitor
 | `/usage-monitor:tools [天数]` | 工具调用统计，默认7天 |
 | `/usage-monitor:hours [天数]` | 星期×小时用量热力，找高峰时段 |
 | `/usage-monitor:context [天数]` | 上下文规模分析：成本花在哪个档位、最肥会话 |
+| `/usage-monitor:roi [天数]` | 效率分析：任务级成本、每$动作数、返工率 |
+| `/usage-monitor:plan` | 未来24小时限额规划（刷新时刻×历史高峰） |
+| `/usage-monitor:card` | 生成月度用量分享卡片（SVG） |
 | `/usage-monitor:advise` | 个性化省钱建议（缓存/上下文/触顶/模型组合） |
 | `/usage-monitor:errors [天数]` | API错误分类诊断（限流/过载/超时/网络） |
 | `/usage-monitor:doctor` | 环境自检：版本/配置/数据源/钩子逐项体检 |

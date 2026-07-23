@@ -15,4 +15,4 @@ allowed-tools: Bash(node:*)
 2. 官方限额里最紧张的窗口（百分比最高的那个）及其刷新时间——超过80%要醒目提醒；
 3. 当前5小时窗口按燃烧率预计的最终消耗。
 
-若用户想看某一项的完整明细，提示对应命令：/usage-monitor:daily、blocks、models、sessions、projects、cache、tools、hours（高峰热力）、context（上下文分析）、advise（省钱建议）、errors（错误诊断）、limits、report、team（团队/多设备）、sync（立即同步）、doctor（环境自检）。
+若用户想看某一项的完整明细，提示对应命令：/usage-monitor:daily、blocks、models、sessions（任务级成本）、roi（效率与返工率）、plan（限额规划）、projects、cache、tools、hours（高峰热力）、context（上下文分析）、advise（省钱建议）、errors（错误诊断）、limits、report、card（月度卡片）、team（团队/多设备）、sync（立即同步）、doctor（环境自检）。
