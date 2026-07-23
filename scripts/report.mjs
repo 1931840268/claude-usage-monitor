@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
-import { loadEntries, computeBlocks, localDate, inputPriceOf, newToolSink } from './usage.mjs';
+import { loadEntries, computeBlocks, localDate, inputPriceOf, newToolSink, prettyProject } from './usage.mjs';
 
 // Categorical palette (validated, light/dark selected separately).
 // Slot order is the CVD-safety mechanism — do not reorder.
@@ -242,7 +242,10 @@ function projectChart({ byProject, totalCost }) {
   const H = padT + rows.length * rowH + 6;
   const plotW = W - padL - padR;
   const maxV = Math.max(1e-6, ...rows.map(([, p]) => p.cost));
-  const label = name => name.length > 30 ? '…' + name.slice(-29) : name;
+  const label = name => {
+    const p = prettyProject(name);
+    return p.length > 30 ? '…' + p.slice(-29) : p;
+  };
   let bars = '';
   rows.forEach(([proj, p], i) => {
     const y = padT + i * rowH + 6;

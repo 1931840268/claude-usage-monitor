@@ -351,6 +351,36 @@ const dw = s => [...stripAnsi(s)].reduce((w, ch) =>
   w + (ch === '️' ? 0 : WIDE.test(ch) ? 2 : 1), 0);
 const padEndDW = (s, n) => s + ' '.repeat(Math.max(0, n - dw(s)));
 
+/** Truncate to a display width, keeping the (more informative) tail. */
+function fitDW(s, w) {
+  if (dw(s) <= w) return s;
+  const chars = [...String(s)];
+  const tail = [];
+  let acc = 1; // room for the leading '…'
+  for (let i = chars.length - 1; i >= 0; i--) {
+    const cw = dw(chars[i]);
+    if (acc + cw > w) break;
+    acc += cw;
+    tail.push(chars[i]);
+  }
+  return '…' + tail.reverse().join('');
+}
+
+/**
+ * Friendlier display for escaped project dir names (display only, JSON keeps
+ * the raw name): the escaped home prefix becomes ~, runs of dashes (escaped
+ * CJK/symbols) collapse to …
+ *   C--Users-me-Desktop-----CropMind → ~\Desktop…CropMind
+ */
+function prettyProject(name) {
+  let s = String(name);
+  let homeEsc = '';
+  try { homeEsc = (os.homedir() || '').replace(/[^A-Za-z0-9]/g, '-'); } catch { /* keep raw */ }
+  if (homeEsc && s.startsWith(homeEsc)) s = '~' + s.slice(homeEsc.length);
+  s = s.replace(/-{2,}/g, '…').replace(/^~-/, '~\\');
+  return s || '~';
+}
+
 function fmtTok(n) {
   if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
   if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
@@ -411,16 +441,26 @@ function sparkline(values) {
   return values.map(v => levels[Math.min(7, Math.floor(v / max * 7.99))]).join('');
 }
 
-/** Bracketed progress bar with threshold coloring. */
+/** Smooth progress bar (eighth-block resolution) with threshold coloring. */
 function progressBar(pct, width = COMPACT ? 12 : 20) {
   const p = Math.max(0, Math.min(100, Number.isFinite(pct) ? pct : 0));
-  const filled = Math.round(p / 100 * width);
   const color = p >= 90 ? C.red : p >= 70 ? C.yellow : C.green;
-  return color('█'.repeat(filled)) + C.dim('░'.repeat(width - filled));
+  const eighths = Math.round(p / 100 * width * 8);
+  const full = Math.min(width, Math.floor(eighths / 8));
+  const frac = full < width ? eighths % 8 : 0;
+  const FRAC = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+  const bar = '█'.repeat(full) + FRAC[frac];
+  return color(bar) + C.dim('░'.repeat(width - full - (frac ? 1 : 0)));
 }
 
 function header(title) {
   console.log(C.bold(C.cyan(`◆ ${title}`)) + '\n');
+}
+
+/** Dashboard section header: bold title + dim rule to a uniform width. */
+function section(title, note = '') {
+  const rule = Math.max(4, 46 - dw(title + note));
+  console.log('\n' + C.bold(title) + (note ? C.dim(note) : '') + ' ' + C.dim('─'.repeat(rule)));
 }
 
 /** Shared footnotes (unpriced models etc.) appended to reports. */
@@ -599,7 +639,7 @@ async function cmdSessions(opts) {
     : ['日期', '项目', '输入', '输出', '成本', '时长', '请求数']];
   for (const [, s] of sorted) {
     const dur = C.dim(fmtDuration(s.lastTs - s.firstTs));
-    const proj = s.project.slice(0, projW);
+    const proj = fitDW(prettyProject(s.project), projW);
     rows.push(COMPACT
       ? [localDate(s.firstTs), proj, fmtUSD(s.agg.cost), dur]
       : [localDate(s.firstTs), proj, fmtTok(s.agg.input),
@@ -1716,7 +1756,7 @@ async function cmdProjects(opts) {
   const totalCost = sorted.reduce((s, [, a]) => s + a.cost, 0);
   const rows = [['项目', '输入', '输出', '成本', '占比', '请求数']];
   for (const [proj, a] of sorted.slice(0, posInt(opts.top, 15))) {
-    const name = proj.length > 38 ? '…' + proj.slice(-37) : proj;
+    const name = fitDW(prettyProject(proj), 38);
     rows.push([name, fmtTok(a.input), fmtTok(a.output), fmtUSD(a.cost),
       C.dim((totalCost > 0 ? Math.round(a.cost / totalCost * 100) : 0) + '%'), String(a.count)]);
   }
@@ -1940,7 +1980,7 @@ async function cmdAll(opts) {
       pctColor(pct)(`${pct}%`) + C.dim(`（${fmtUSD(today)}/${fmtUSD(budget)}）`));
   }
 
-  console.log('\n' + C.bold('📡 官方限额') + C.dim('（订阅实时）'));
+  section('📡 官方限额', '（订阅实时）');
   if (official.error === 'no-credentials') {
     console.log(C.dim('　未找到订阅凭据，跳过（API Key用户以本地估算为准）。'));
   } else if (official.error) {
@@ -1952,7 +1992,7 @@ async function cmdAll(opts) {
     if (eta) console.log(eta);
   }
 
-  console.log('\n' + C.bold('⏱ 当前5小时窗口'));
+  section('⏱ 当前5小时窗口');
   if (active) {
     const elapsedPct = Math.min(100, Math.round((now - active.startMs) / BLOCK_MS * 100));
     let line = `${fmtLocal(active.startMs)}~${fmtLocal(active.endMs)}　` + progressBar(elapsedPct) +
@@ -1975,15 +2015,18 @@ async function cmdAll(opts) {
   console.log('\n' + C.bold('📈 近14天 ') + C.cyan(sparkline(trend)) +
     C.dim(` 日均${fmtUSD(trend.reduce((a, b) => a + b, 0) / trendDays)}`));
 
-  console.log('\n' + C.bold('🤖 今日按模型'));
+  section('🤖 今日按模型');
   console.log(byModelToday.size ? modelTable(byModelToday, { withCount: true }) : C.dim('　今天还没有用量。'));
 
   if (topProjects.length) {
-    console.log('\n' + C.bold('📁 项目Top 3') + C.dim('（近7天）'));
+    section('📁 项目Top 3', '（近7天）');
+    const nameW = COMPACT ? 20 : 30;
     for (const [proj, a] of topProjects) {
-      const name = proj.length > 36 ? '…' + proj.slice(-35) : proj;
       const share = proj7dTotal > 0 ? Math.round(a.cost / proj7dTotal * 100) : 0;
-      console.log(`　${padEndDW(name, 38)} ${fmtUSD(a.cost).padStart(7)} ${C.dim(share + '%')}`);
+      const name = fitDW(prettyProject(proj), nameW);
+      const bar = C.cyan('▮'.repeat(Math.max(1, Math.round(share / 100 * 12))));
+      console.log(`　${padEndDW(name, nameW)} ${fmtUSD(a.cost).padStart(7)} ` +
+        `${C.dim(String(share).padStart(3) + '%')} ${bar}`);
     }
   }
   footnotes();
@@ -2072,7 +2115,7 @@ async function main() {
   await fn(opts);
 }
 
-export { loadEntries, computeBlocks, localDate, resolvePricing, inputPriceOf, newToolSink, PRICING };
+export { loadEntries, computeBlocks, localDate, resolvePricing, inputPriceOf, newToolSink, prettyProject, PRICING };
 
 // Run only when invoked directly (report.mjs imports this file as a library).
 if (process.argv[1] && path.basename(process.argv[1]) === 'usage.mjs') {
