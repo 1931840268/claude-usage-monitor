@@ -346,7 +346,7 @@ const C = {
 
 const stripAnsi = s => String(s).replace(/\x1b\[[0-9;]*m/g, '');
 // CJK/fullwidth chars and emoji occupy 2 terminal columns everywhere.
-const WIDE = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦⏩-⏺☀-➿⬀-⯿\u{1F300}-\u{1FAFF}]/u;
+const WIDE = /[　ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦⏩-⏺☀-➿⬀-⯿\u{1F300}-\u{1FAFF}]/u;
 // Ambiguous-width symbols: modern terminals (Windows Terminal / VS Code)
 // render them 1 column, legacy CJK consoles render 2. Default 1; set
 // {"display": {"ambiguous_wide": true}} in usage-monitor.json for legacy.
@@ -487,7 +487,7 @@ function section(title, note = '') {
 /** Shared footnotes (unpriced models etc.) appended to reports. */
 function footnotes() {
   if (unknownModels.size) {
-    console.log('\n' + C.yellow(`⚠ 以下模型不在价格表中，成本按$0计：${[...unknownModels].join('、')}`));
+    console.log('\n' + C.yellow(`${emo('⚠')}以下模型不在价格表中，成本按$0计：${[...unknownModels].join('、')}`));
   }
 }
 
@@ -926,7 +926,7 @@ function fiveHourEtaLine(data, now = Date.now()) {
   if (!(rate > 0)) return null;
   const etaTs = now + (100 - l.pct) / rate * 60000;
   if (etaTs < l.resetTs) {
-    return C.red(`⚠ 按当前速度约${fmtLocal(etaTs)}触顶（早于${fmtLocal(l.resetTs)}刷新），建议放缓`);
+    return C.red(`${emo('⚠')}按当前速度约${fmtLocal(etaTs)}触顶（早于${fmtLocal(l.resetTs)}刷新），建议放缓`);
   }
   const projPct = Math.round(l.pct + rate * (l.resetTs - now) / 60000);
   return C.dim(`按当前速度到刷新时约${projPct}%，不会触顶`);
@@ -1513,7 +1513,7 @@ async function cmdImport(opts) {
     console.log(C.red(`导入失败：${r.error}。`));
     process.exitCode = 1; return;
   }
-  if (r.dropped > 0) console.log(C.yellow(`⚠ 已跳过${r.dropped}个畸形/无效的日期条目。`));
+  if (r.dropped > 0) console.log(C.yellow(`${emo('⚠')}已跳过${r.dropped}个畸形/无效的日期条目。`));
   if (opts.json) return out({ device: r.device, days: r.days, dropped: r.dropped });
   console.log(C.green(`已导入设备「${r.device}」的${r.days}天数据。`));
   console.log(C.dim('daily/weekly/monthly报表现在会合并该设备的用量（重复导入同名设备会整体覆盖）。'));
@@ -1581,7 +1581,7 @@ async function cmdSync(opts) {
     ? C.green(`已合并${r.imported.length}台设备：` +
       r.imported.map(x => `${x.device}（${x.days}天）`).join('、'))
     : C.dim('同步目录中暂无其他设备的导出文件。'));
-  for (const e of r.errors) console.log(C.yellow(`⚠ ${e}`));
+  for (const e of r.errors) console.log(C.yellow(`${emo('⚠')}${e}`));
   console.log(C.dim('\n查看按设备/成员汇总：node usage.mjs team'));
 }
 
@@ -1999,7 +1999,7 @@ async function cmdAll(opts) {
   const budget = Number(userConfig().daily_budget_usd);
   if (Number.isFinite(budget) && budget > 0) {
     const pct = Math.round(today / budget * 100);
-    console.log(C.bold('🎯 预算　') + progressBar(pct) + ' ' +
+    console.log(C.bold(emo('🎯') + '预算　') + progressBar(pct) + ' ' +
       pctColor(pct)(`${pct}%`) + C.dim(`（${fmtUSD(today)}/${fmtUSD(budget)}）`));
   }
 
