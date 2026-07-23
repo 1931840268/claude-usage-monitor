@@ -119,6 +119,7 @@ Fable 5(xhigh) | 💰 会话$3.21 / 今日$142 / 窗口$139 | 5h 63% 剩2h05m(18
 - `statusline.separator`：段间分隔符，默认`" | "`。
 - `statusline.warn_pct`/`danger_pct`：百分比着色阈值（达到warn变黄、达到danger变红），默认50/80；非法值自动回退。
 - `display.ambiguous_wide`：若你的终端是老式CJK控制台（`…◆`等符号占2列）且表格出现错位，设为`true`；现代终端（Windows Terminal/VS Code）保持默认即可。
+- `display.emoji`：设为`false`剥离全部装饰emoji（纯文字界面）。适用于emoji字形画得比字符格宽、会压住后面文字的终端；警示信息全部由颜色承担，关掉不损失任何信息。
 
 ## 会话启动钩子
 

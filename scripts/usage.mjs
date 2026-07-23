@@ -360,6 +360,16 @@ const ambigWidth = () => {
 };
 const dw = s => [...stripAnsi(s)].reduce((w, ch) =>
   w + (/\uFE0F/.test(ch) ? 0 : WIDE.test(ch) ? 2 : AMBIG.test(ch) ? ambigWidth() : 1), 0);
+
+// Decorative emoji prefix. Some terminals draw emoji glyphs wider than their
+// character cells and they visually cover the following text; setting
+// {"display": {"emoji": false}} strips every decorative emoji for a pure-text
+// interface. Warning states always rely on color, never on the emoji.
+let _emojiOn = null;
+function emo(sym) {
+  if (_emojiOn == null) _emojiOn = userConfig().display?.emoji !== false;
+  return _emojiOn ? sym + ' ' : '';
+}
 const padEndDW = (s, n) => s + ' '.repeat(Math.max(0, n - dw(s)));
 
 /** Truncate to a display width, keeping the (more informative) tail. */
@@ -718,7 +728,7 @@ async function cmdBlocks(opts) {
       const remainMin = Math.max(0, (active.endMs - now) / 60000);
       const projTok = active.agg.input + active.agg.output + active.tokensPerMin * remainMin;
       const projCost = active.agg.cost + (active.costPerHour / 60) * remainMin;
-      console.log(C.dim(`🔥 燃烧率${fmtTok(active.tokensPerMin)}tok/min　📊 按当前速度到刷新时约${fmtTok(projTok)}tok、${fmtUSD(projCost)}`));
+      console.log(C.dim(`${emo('🔥')}燃烧率${fmtTok(active.tokensPerMin)}tok/min　${emo('📊')}按当前速度到刷新时约${fmtTok(projTok)}tok、${fmtUSD(projCost)}`));
     }
     console.log('\n' + C.bold('当前窗口模型分布：'));
     console.log(modelTable(active.models));
@@ -1123,7 +1133,7 @@ async function renderStatusline() {
       if (typeof sessionCost === 'number') bits.push(`会话${fmtUSD(sessionCost)}`);
       bits.push(`今日${fmtUSD(local.todayCost)}`);
       if (local.block) bits.push(`窗口${fmtUSD(local.block.cost)}`);
-      return '💰 ' + bits.join(' / ');
+      return emo('💰') + bits.join(' / ');
     },
     budget() {
       // daily budget warning (optional, from ~/.claude/usage-monitor.json)
@@ -1131,7 +1141,7 @@ async function renderStatusline() {
       if (!Number.isFinite(budget) || budget <= 0) return null;
       const pct = Math.round(local.todayCost / budget * 100);
       if (pct < 80) return null;
-      return col(pct)(`${pct >= 100 ? '🚨 超预算' : '⚠ 预算'}${pct}%`);
+      return col(pct)(`${pct >= 100 ? '超预算' : '预算'}${pct}%`);
     },
     '5h'() {
       // official rate_limits first, local block estimate as fallback
@@ -1164,8 +1174,8 @@ async function renderStatusline() {
     burn() {
       if (!local.block || !(local.block.tokensPerMin > 0)) return null;
       const tpm = local.block.tokensPerMin;
-      const flame = tpm >= 5000 ? '🚨' : tpm >= 2000 ? '⚠️' : '🔥';
-      return C.dim(`${flame} ${fmtTok(tpm)}tok/min`);
+      const paintBy = tpm >= 5000 ? C.red : tpm >= 2000 ? C.yellow : C.dim;
+      return paintBy(`${fmtTok(tpm)}tok/min`);
     },
     eta() {
       // warning-only: appears when the 5h window is projected to hit 100%
@@ -1181,7 +1191,7 @@ async function renderStatusline() {
       const rate = pct / elapsedMin;
       if (!(rate > 0)) return null;
       const etaTs = now + (100 - pct) / rate * 60000;
-      return etaTs < t ? C.red(`⚠ 触顶约${fmtLocal(etaTs)}`) : null;
+      return etaTs < t ? C.red(`触顶约${fmtLocal(etaTs)}`) : null;
     },
   };
 
@@ -1236,7 +1246,7 @@ async function cmdHookSessionStart() {
         const top = [...models.entries()].sort((a, b) => b[1] - a[1])[0];
         const delta = dCost > 0.005
           ? `（较前日${yCost >= dCost ? '↑' : '↓'}${Math.abs(Math.round((yCost - dCost) / dCost * 100))}%）` : '';
-        lines.push(`📊 昨日（${localDate(y0)}）用量${fmtUSD(yCost)}${delta}，` +
+        lines.push(`${emo('📊')}昨日（${localDate(y0)}）用量${fmtUSD(yCost)}${delta}，` +
           `${yReq}次请求，主力${shortModel(top[0])}，缓存净省${fmtUSD(yCacheNet)}`);
       }
       state.last_summary_date = today;
@@ -1252,7 +1262,7 @@ async function cmdHookSessionStart() {
       for (const l of limitEntries(data)) {
         if (l.pct < warnPct) continue;
         const reset = Number.isFinite(l.resetTs) ? `，${fmtResetAt(l.resetTs)}刷新` : '';
-        lines.push(`⚠️ ${l.name}已用${Math.round(l.pct)}%${reset}，注意放缓或换更省额度的模型`);
+        lines.push(`${emo('⚠️')}${l.name}已用${Math.round(l.pct)}%${reset}，注意放缓或换更省额度的模型`);
       }
     }
 
@@ -1976,7 +1986,7 @@ async function cmdAll(opts) {
   const cacheSeg = cacheSave >= 0
     ? C.green(`缓存净省${fmtUSD(cacheSave)}`)
     : C.red(`缓存倒贴${fmtUSD(-cacheSave)}`);
-  console.log(C.bold('💰 成本　') + `今日${C.bold(fmtUSD(today))}${vsYesterday}　·　近7天${fmtUSD(week)}` +
+  console.log(C.bold(emo('💰') + '成本　') + `今日${C.bold(fmtUSD(today))}${vsYesterday}　·　近7天${fmtUSD(week)}` +
     `　·　近30天${fmtUSD(month)}　·　${cacheSeg}`);
 
   let weekCmp = '';
@@ -1984,7 +1994,7 @@ async function cmdAll(opts) {
     const d = Math.round((weekThis - weekLastSame) / weekLastSame * 100);
     if (d !== 0) weekCmp = C.dim('（较上周同期') + (d > 0 ? C.red(`↑${d}%`) : C.green(`↓${-d}%`)) + C.dim('）');
   }
-  console.log(C.bold('📅 本周　') + `${fmtUSD(weekThis)}${weekCmp}　·　上周全周${fmtUSD(weekLastFull)}`);
+  console.log(C.bold(emo('📅') + '本周　') + `${fmtUSD(weekThis)}${weekCmp}　·　上周全周${fmtUSD(weekLastFull)}`);
 
   const budget = Number(userConfig().daily_budget_usd);
   if (Number.isFinite(budget) && budget > 0) {
@@ -1993,7 +2003,7 @@ async function cmdAll(opts) {
       pctColor(pct)(`${pct}%`) + C.dim(`（${fmtUSD(today)}/${fmtUSD(budget)}）`));
   }
 
-  section('📡 官方限额', '（订阅实时）');
+  section(emo('📡') + '官方限额', '（订阅实时）');
   if (official.error === 'no-credentials') {
     console.log(C.dim('　未找到订阅凭据，跳过（API Key用户以本地估算为准）。'));
   } else if (official.error) {
@@ -2005,34 +2015,34 @@ async function cmdAll(opts) {
     if (eta) console.log(eta);
   }
 
-  section('⏱ 当前5小时窗口');
+  section(emo('⏱') + '当前5小时窗口');
   if (active) {
     const elapsedPct = Math.min(100, Math.round((now - active.startMs) / BLOCK_MS * 100));
-    let line = `${fmtLocal(active.startMs)}~${fmtLocal(active.endMs)}　` + progressBar(elapsedPct) +
+    const line = `${fmtLocal(active.startMs)}~${fmtLocal(active.endMs)}　` + progressBar(elapsedPct) +
       ` 已过${elapsedPct}%　已花${fmtUSD(active.agg.cost)}　${C.yellow(fmtLocal(active.endMs) + '刷新')}(剩${fmtDuration(active.endMs - now)})`;
     console.log(line);
     if (active.limitHits.length) {
       const hitReset = active.limitHits[active.limitHits.length - 1].resetTs;
-      console.log(C.red(`🚫 本窗口已触顶限流` +
+      console.log(C.red(emo('🚫') + '本窗口已触顶限流' +
         (Number.isFinite(hitReset) ? `，官方刷新时间${fmtResetAt(hitReset)}` : '')));
     }
     if (active.tokensPerMin != null) {
       const remainMin = Math.max(0, (active.endMs - now) / 60000);
       const projCost = active.agg.cost + (active.costPerHour / 60) * remainMin;
-      console.log(C.dim(`🔥 ${fmtTok(active.tokensPerMin)}tok/min　📊 按当前速度到刷新约${fmtUSD(projCost)}`));
+      console.log(C.dim(`${emo('🔥')}${fmtTok(active.tokensPerMin)}tok/min　${emo('📊')}按当前速度到刷新约${fmtUSD(projCost)}`));
     }
   } else {
     console.log(C.dim('　当前没有活动窗口。'));
   }
 
-  console.log('\n' + C.bold('📈 近14天 ') + C.cyan(sparkline(trend)) +
+  console.log('\n' + C.bold(emo('📈') + '近14天 ') + C.cyan(sparkline(trend)) +
     C.dim(` 日均${fmtUSD(trend.reduce((a, b) => a + b, 0) / trendDays)}`));
 
-  section('🤖 今日按模型');
+  section(emo('🤖') + '今日按模型');
   console.log(byModelToday.size ? modelTable(byModelToday, { withCount: true }) : C.dim('　今天还没有用量。'));
 
   if (topProjects.length) {
-    section('📁 项目Top 3', '（近7天）');
+    section(emo('📁') + '项目Top 3', '（近7天）');
     const nameW = COMPACT ? 20 : 30;
     for (const [proj, a] of topProjects) {
       const share = proj7dTotal > 0 ? Math.round(a.cost / proj7dTotal * 100) : 0;
