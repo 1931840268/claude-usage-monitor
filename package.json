@@ -1,6 +1,6 @@
 {
   "name": "claude-usage-monitor",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Claude Code usage plugin: official rate limits, per-task ROI analytics, advice engine, MCP tools. Zero dependencies.",
   "type": "module",
   "bin": {

@@ -44,6 +44,15 @@
 
 - [x] 发布到GitHub：https://github.com/1931840268/claude-usage-monitor（MIT协议，发布前经隐私审计）。
 
+## 已完成（v1.1.0）
+
+- [x] 英文UI（P0范围）：all/today/limits/blocks/roi/plan/statusline/help与失败文案全部en/zh双语，`--lang`＞`CLAUDE_USAGE_LANG`＞`display.lang`＞locale自动检测（中文环境默认中文）。
+
+## 进行中
+
+- [ ] 英文UI（P1范围）：advise/errors/doctor/sessions/context等其余命令面英文化。
+
 ## 远期想法
 
-- [ ] 提交到社区插件市场聚合列表（如awesome-claude-code等，视需要）。
+- [ ] 发布npm包（`npx claude-usage-monitor`短命令＋下载量徽章，需npm账号）。
+- [ ] 提交到社区插件市场聚合列表（awesome-claude-code须先积累真实用户，走issue表单）。

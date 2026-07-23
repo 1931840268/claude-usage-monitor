@@ -2,70 +2,72 @@
 
 # claude-usage-monitor
 
-**The only Claude Code usage plugin that reads your official rate limits — plus per-task attribution, ROI analytics, and a built-in advice engine. Zero dependencies.**
+**Reads your real Anthropic rate limits (5h / 7d / per-model weekly) instead of estimating them — then goes further: per-task cost attribution, rework-rate ROI analytics, and a built-in advice engine. Zero dependencies, English & Chinese output.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](package.json)
 [![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-blue.svg)](package.json)
 [![GitHub Release](https://img.shields.io/github/v/release/1931840268/claude-usage-monitor)](https://github.com/1931840268/claude-usage-monitor/releases)
-[![GitHub Stars](https://img.shields.io/github/stars/1931840268/claude-usage-monitor?style=social)](https://github.com/1931840268/claude-usage-monitor)
 
-[中文文档（完整版）](README_zh.md) · Interface is currently Chinese-first — numbers, bars and charts read universally; English UI is on the roadmap.
+[中文文档（完整版）](README_zh.md) · Output language auto-detects your locale (`--lang en|zh` to override).
 
-<img src="docs/assets/dashboard.png" width="820" alt="all-in-one dashboard" />
+<img src="docs/assets/dashboard.png" width="820" alt="all-in-one dashboard (synthetic demo data)" />
+<br/><sub>All screenshots use synthetic demo data — your real data never leaves your machine.</sub>
 
 </div>
-
-## Why this one?
-
-Every usage tracker can add up your tokens. This one answers the questions the others can't:
-
-| Capability | ccusage | Usage&nbsp;Monitor | **this plugin** |
-| --- | :-: | :-: | :-: |
-| Reads **official rate limits** from Anthropic's API (no guessing, no P90 estimates) | – | partial | **✓ 5h / 7d / per-model weekly, with reset times** |
-| **Per-task attribution** — sessions show *what you asked for*, not UUIDs | – | – | **✓** |
-| **ROI analytics** — actions per $, edit ops, rework rate | – | – | **✓** |
-| **Advice engine** — cache health, context bloat, model mix, limit hits | – | – | **✓** |
-| **24h limit planner** — reset moments × your historical peak hours | – | – | **✓** |
-| Plugin-native: slash commands, SessionStart hooks, statusline | – | – | **✓ 21 slash cmds** |
-| **MCP tools** — let Claude query (and throttle) its own usage | – | – | **✓ 17 tools** |
-| Auto daily / weekly briefings + archived HTML weekly reports | – | – | **✓** |
-| Multi-device sync + team view | – | – | **✓** |
-| Anomaly burn sentinel (runaway agent loops flagged in ~1 min) | – | – | **✓** |
-| Zero-dependency HTML report (8 charts, light/dark) | – | – | **✓** |
-| Dependencies | Rust binary | Python pkgs | **0** |
-
-*Your usage report finds you — not the other way around*: the SessionStart hook drops yesterday's summary, weekly recap and limit warnings right into your session.
 
 ## Quick start
 
 ```bash
-# Try it in 10 seconds — no install, works anywhere Node >= 18 lives
+# Try it in ~15 seconds, nothing to install.
+# (npx supports GitHub specifiers: this clones the repo and runs its bin — zero deps, ~120KB of auditable .mjs)
 npx github:1931840268/claude-usage-monitor all
 ```
 
 ```bash
-# Full plugin install (slash commands + hooks + statusline + MCP)
+# Full plugin install: 23 slash commands + SessionStart hooks + statusline + 17 MCP tools
 claude plugin marketplace add 1931840268/claude-usage-monitor
 claude plugin install usage-monitor@usage-monitor-market
 ```
 
 Then inside Claude Code: `/usage-monitor:usage` for the dashboard, `/usage-monitor:advise` for personalized savings tips.
 
+## How it compares
+
+Honest version, checked against both projects' docs on 2026-07-24. [ccusage](https://github.com/ryoppippi/ccusage) (17k+ stars) and [Claude Code Usage Monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor) (8k+ stars) are excellent, mature tools — if you want a battle-tested multi-agent cost CLI or a rich live TUI, use them. This plugin trades their maturity and breadth for analysis depth and plugin-native automation:
+
+| Capability | ccusage | Usage Monitor | this plugin |
+| --- | :-: | :-: | :-: |
+| Maturity, community, release count | **17k+ stars** | **8k+ stars** | day one |
+| Multi-agent coverage (Codex, Gemini CLI, …) | **16 sources** | – | Claude Code only |
+| Statusline integration | ✓ (Beta) | ✓ (`--statusline`) | ✓ |
+| Actively queries the official usage API¹ | – | passive capture² | ✓ per-model weekly + reset times |
+| Per-task attribution (sessions titled by what you asked) | – | – | ✓ |
+| ROI analytics: actions per $, rework rate | – | – | ✓ |
+| Advice engine (cache health, context bloat, model mix) | – | – | ✓ |
+| 24h limit planner (resets × your peak hours) | – | – | ✓ |
+| Scheduled briefings³ (daily/weekly, auto-archived HTML) | – | – | ✓ via SessionStart hook |
+| Ships as a Claude Code plugin (slash commands + hooks + MCP) | – | – | ✓ 23 cmds, 17 MCP tools |
+| Runtime | native binary via npx/bunx | Python + pip | reuses Claude Code's own Node |
+
+¹ Requires a Pro/Max subscription (OAuth). API-key accounts have no rate-limit data — the plugin falls back to ccusage-compatible local window estimates. ccusage parses limit-reset timestamps from transcripts after you hit a limit, but does not query quota utilization.
+² Usage Monitor captures the official `rate_limits` that Claude Code passes to statusline hooks (5h/7d); when captures go stale it falls back to labeled P90 estimates. It does not query the API directly and has no per-model weekly quotas.
+³ Both tools have on-demand daily/weekly report commands; neither pushes scheduled briefings into your session or archives HTML reports automatically.
+
 ## What it looks like
 
 | ROI — what did each dollar buy | 24h limit planner |
 | --- | --- |
-| <img src="docs/assets/roi.png" alt="roi" /> | <img src="docs/assets/plan.png" alt="plan" /> |
+| <img src="docs/assets/roi.png" alt="roi (synthetic demo data)" /> | <img src="docs/assets/plan.png" alt="plan (synthetic demo data)" /> |
 
 <details>
 <summary><b>Zero-dependency HTML report (8 charts, light/dark, theme toggle)</b></summary>
-<img src="docs/assets/report.png" alt="html report" />
+<img src="docs/assets/report.png" alt="html report (synthetic demo data)" />
 </details>
 
 <details>
 <summary><b>Shareable monthly card (SVG, generated locally)</b></summary>
-<img src="docs/assets/card.svg" width="640" alt="monthly card" />
+<img src="docs/assets/card.svg" width="640" alt="monthly card (synthetic demo data)" />
 </details>
 
 ## Feature map
@@ -74,18 +76,23 @@ Then inside Claude Code: `/usage-monitor:usage` for the dashboard, `/usage-monit
 - **Deep analytics** — `sessions` (task titles), `roi` (rework rate), `context` (context-size cost bands), `hours` (weekday×hour heatmap), `errors` (API failure taxonomy), `tools`, `projects`, `cache`.
 - **Decisions, not just numbers** — `advise` engine, `plan` 24h timeline, monthly forecast + subscription-value multiple on the dashboard.
 - **Automation** — SessionStart hook: daily brief, weekly recap, archived HTML weekly reports, limit warnings, background multi-device sync; statusline with anomaly burn sentinel.
-- **Integrations** — 21 slash commands, 17 MCP tools (`usage_dashboard`, `usage_advise`, `usage_roi`, …), `--json` everywhere, `--csv` exports, `live` terminal dashboard, `card` monthly SVG, `doctor` self-check.
+- **Integrations** — 23 slash commands, 17 MCP tools (`usage_dashboard`, `usage_advise`, `usage_roi`, …), `--json` everywhere, `--csv` exports, `live` terminal dashboard, `card` monthly SVG, `doctor` self-check.
 - **Team & fleet** — folder-based auto sync (`sync_dir`), per-device/member `team` view, strict import sanitization.
 
-Full command reference, configuration keys and FAQ: **[中文文档](README_zh.md)**.
+Language: core commands (`all`, `today`, `limits`, `blocks`, `roi`, `plan`, statusline, help) are fully localized (en/zh, auto-detected); remaining analytics commands are Chinese-first with English on the [roadmap](ROADMAP.md). Full command reference & configuration: [中文文档](README_zh.md).
 
-## Privacy
+## Security & privacy
 
-Everything runs locally against `~/.claude` transcripts. No telemetry, no uploads; the official-limits call goes only to Anthropic's own endpoint with your existing credentials. Screenshots above use synthetic demo data.
+You should not have to trust a new repo — verify it in 30 seconds:
 
-## Star History
+- **Zero dependencies.** Three plain `.mjs` files, no install scripts, no lockfile to poison.
+- **One outbound endpoint.** The only network call is Anthropic's own usage API, using the credentials Claude Code already stores. Check for yourself:
 
-[![Star History Chart](https://api.star-history.com/svg?repos=1931840268/claude-usage-monitor&type=Date)](https://star-history.com/#1931840268/claude-usage-monitor&Date)
+```bash
+grep -rn "https://" scripts/   # exactly one hit: api.anthropic.com/api/oauth/usage
+```
+
+- Everything else parses local `~/.claude` transcripts. No telemetry, no uploads. The HTML report, monthly card and exports are files on your disk.
 
 ## License
 

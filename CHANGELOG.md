@@ -1,5 +1,14 @@
 # 更新日志
 
+## v1.1.0（2026-07-24）
+
+国际化与诚信版（基于四视角冷眼审计的全部裁决）。
+
+- 英文UI（P0）：all/today/limits/blocks/roi/plan/statusline/help与失败文案全部en/zh双语；语言优先级--lang＞CLAUDE_USAGE_LANG＞display.lang＞locale自动检测，中文环境默认中文零变化；EN模式经机器断言零中文字符。
+- README重写：删「The only」最高级与Star History；对比表按逐行事实核查重写（statusline行如实给两家打✓、主动认输成熟度/社区/多agent覆盖三行、Runtime口径统一、三条脚注钉死official limits口径与Pro/Max前提）；新增Security节（唯一外网端点grep自查命令，已实测命中数=1）。
+- 英雄截图全部换为英文演示数据版并标注synthetic demo data；README_zh修正MCP工具数10→17并补全清单、命令数更正为23、首屏补图。
+- 仓库描述改为单句英文陈述；ROADMAP落实英文UI条目（P0已完成、P1进行中），消除「roadmap查无实据」问题。
+
 ## v1.0.0（2026-07-24）
 
 里程碑版：面向全球用户的分发与包装（基于对ccusage/Usage Monitor/sniffly/viberank等竞品的系统调研）。

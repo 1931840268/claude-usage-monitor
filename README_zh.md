@@ -2,6 +2,10 @@
 
 [English README](README.md) · 十秒试用：`npx github:1931840268/claude-usage-monitor all`
 
+<img src="docs/assets/dashboard.png" width="820" alt="整合仪表盘（合成演示数据）" />
+
+<sub>截图均为合成演示数据；输出语言自动跟随系统（中文环境即中文，`--lang`可切换）。</sub>
+
 一个可直接安装进Claude Code的用量监控插件：查看各模型的token用量与成本、5小时/7天限额窗口的利用率与刷新时间、会话成本排行，并可在底部状态栏实时显示。零依赖，只需Node.js（Claude Code本身就依赖Node，无需额外安装）。
 
 设计参考了ccusage（17k星）、Claude Code Usage Monitor（8.5k星）、ccstatusline、claude-powerline等主流开源工具，并与ccusage的5小时窗口算法保持一致；官方限额数据直接来自Anthropic接口，非估算值。
@@ -29,7 +33,7 @@
 | 5小时窗口 | 本地估算的限额窗口、刷新时间、燃烧率、进度条与消耗预测（与ccusage算法一致） |
 | 官方限额 | 5小时/7天/各模型周配额的官方利用率、severity与刷新时间（Pro/Max订阅）；按当前速度的触顶预测 |
 | 会话钩子 | 会话启动时自动输出昨日小结＋限额预警（阈值可配，可关闭） |
-| MCP服务器 | 用量数据暴露为10个MCP工具，任何MCP客户端可查询（插件启用自动启动） |
+| MCP服务器 | 用量数据暴露为17个MCP工具，任何MCP客户端可查询（插件启用自动启动） |
 | 多设备同步 | 配置`sync_dir`共享目录后自动同步（钩子每6小时），`export`/`import`可手动合并 |
 | 团队视图 | `team`命令按设备/成员汇总成本；成员共用同一同步目录即得整队视图 |
 | 会话/项目排行 | 按成本排序的会话Top榜（含时长）与项目维度汇总 |
@@ -166,7 +170,7 @@ Fable 5(xhigh) | 💰 会话$3.21 / 今日$142 / 窗口$139 | 5h 63% 剩2h05m(18
 
 ## MCP服务器
 
-插件捆绑了一个零依赖的stdio MCP服务器（`.mcp.json`注册，插件启用后自动启动），把用量数据暴露为10个MCP工具：`usage_dashboard`、`usage_today`、`usage_daily`、`usage_blocks`、`usage_limits`、`usage_tools`、`usage_sessions`、`usage_projects`、`usage_cache`、`usage_team`（均返回JSON，支持`days`/`top`数字参数）。在Claude Code里工具名形如`mcp__plugin_usage-monitor_usage__usage_dashboard`；也可以把同样的命令配置到Claude Desktop等其他MCP客户端查询本机用量。
+插件捆绑了一个零依赖的stdio MCP服务器（`.mcp.json`注册，插件启用后自动启动），把用量数据暴露为17个MCP工具：`usage_dashboard`、`usage_today`、`usage_daily`、`usage_blocks`、`usage_limits`、`usage_tools`、`usage_sessions`、`usage_projects`、`usage_cache`、`usage_team`、`usage_hours`、`usage_doctor`、`usage_context`、`usage_advise`、`usage_errors`、`usage_roi`、`usage_plan`（均返回JSON，支持`days`/`top`数字参数）。在Claude Code里工具名形如`mcp__plugin_usage-monitor_usage__usage_dashboard`；也可以把同样的命令配置到Claude Desktop等其他MCP客户端查询本机用量。
 
 ## 多设备自动同步与团队视图
 
@@ -211,7 +215,7 @@ claude-usage-monitor/
 ├─ .claude-plugin/
 │  ├─ plugin.json          插件清单
 │  └─ marketplace.json     本地插件市场清单
-├─ commands/               斜杠命令（15个）
+├─ commands/               斜杠命令（23个）
 ├─ .mcp.json               MCP服务器注册（插件启用自动启动）
 ├─ hooks/
 │  └─ hooks.json           SessionStart钩子注册（昨日小结＋限额预警）
