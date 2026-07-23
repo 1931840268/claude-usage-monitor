@@ -1,0 +1,40 @@
+{
+  "name": "claude-usage-monitor",
+  "version": "1.0.0",
+  "description": "Claude Code usage plugin: official rate limits, per-task ROI analytics, advice engine, MCP tools. Zero dependencies.",
+  "type": "module",
+  "bin": {
+    "claude-usage-monitor": "scripts/usage.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "scripts",
+    "commands",
+    "hooks",
+    ".claude-plugin",
+    ".mcp.json",
+    "README.md",
+    "README_zh.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "anthropic",
+    "usage",
+    "cost",
+    "rate-limit",
+    "token",
+    "statusline",
+    "mcp"
+  ],
+  "author": "1931840268",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1931840268/claude-usage-monitor.git"
+  },
+  "homepage": "https://github.com/1931840268/claude-usage-monitor#readme"
+}

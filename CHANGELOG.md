@@ -1,5 +1,15 @@
 # 更新日志
 
+## v1.0.0（2026-07-24）
+
+里程碑版：面向全球用户的分发与包装（基于对ccusage/Usage Monitor/sniffly/viberank等竞品的系统调研）。
+
+- README英文化：英文默认＋单句定位语（「唯一直读官方限额的Claude Code用量插件」）＋竞品对比表＋演示数据英雄截图（深色终端窗风格，合成数据零隐私）；中文完整文档移至README_zh.md互链。
+- npx零安装试用：新增package.json与bin入口，`npx github:1931840268/claude-usage-monitor all`十秒出仪表盘，无需先装插件。
+- 演示素材体系：docs/assets下入库仪表盘/ROI/plan英雄图、HTML报告长图、月卡SVG（全部由合成演示数据生成）。
+- 仓库元数据：英文description与topics（claude-code/claude/anthropic/usage-tracking等），进入GitHub topic被动流量入口；创建首个GitHub Release。
+- 徽章：MIT/零依赖/Node版本/Release/Stars＋Star History。
+
 ## v0.9.1（2026-07-24）
 
 全量QA修复：
