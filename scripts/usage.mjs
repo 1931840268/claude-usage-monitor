@@ -578,6 +578,7 @@ async function cmdDaily(opts) {
   const days = posInt(opts.days, 7);
   const byDay = await dayAggregates(days); // live JSONL + history snapshots
   const dates = [...byDay.keys()].sort();
+  if (opts.csv) return outCsv(dates.map(d => ({ date: d, ...aggJson(byDay.get(d).agg) })));
   if (opts.json) {
     return out(dates.map(d => ({
       date: d, ...aggJson(byDay.get(d).agg), models: mapJson(byDay.get(d).models),
@@ -623,10 +624,15 @@ async function cmdDaily(opts) {
 }
 
 async function cmdModels(opts) {
-  const entries = await loadEntries();
+  const days = posInt(opts.days, 0);
+  const entries = await loadEntries({ sinceMs: days ? Date.now() - days * 86400000 : 0 });
   const byModel = groupBy(entries, e => e.model);
+  if (opts.csv) {
+    return outCsv([...byModel.entries()].sort((a, b) => b[1].cost - a[1].cost)
+      .map(([m, a]) => ({ model: m, ...aggJson(a) })));
+  }
   if (opts.json) return out({ models: mapJson(byModel), total: totalJson(byModel) });
-  header('全部历史按模型汇总');
+  header(days ? `按模型汇总（最近${days}天）` : '全部历史按模型汇总');
   console.log(entries.length ? modelTable(byModel, { withCount: true }) : C.dim('没有用量记录。'));
   footnotes();
 }
@@ -646,13 +652,13 @@ async function cmdSessions(opts) {
     s.lastTs = Math.max(s.lastTs, e.ts);
   }
   const sorted = [...bySession.entries()].sort((a, b) => b[1].agg.cost - a[1].agg.cost).slice(0, top);
-  if (opts.json) {
-    return out(sorted.map(([id, s]) => ({
-      session_id: id, project: s.project,
-      start: new Date(s.firstTs).toISOString(), end: new Date(s.lastTs).toISOString(),
-      ...aggJson(s.agg),
-    })));
-  }
+  const flat = () => sorted.map(([id, s]) => ({
+    session_id: id, project: s.project,
+    start: new Date(s.firstTs).toISOString(), end: new Date(s.lastTs).toISOString(),
+    ...aggJson(s.agg),
+  }));
+  if (opts.csv) return outCsv(flat());
+  if (opts.json) return out(flat());
   header(`会话排行 Top ${sorted.length}（按成本）`);
   const projW = COMPACT ? 18 : 30;
   const rows = [COMPACT
@@ -753,6 +759,20 @@ function blockJson(b, now = Date.now()) {
 }
 
 const mapJson = map => Object.fromEntries([...map.entries()].map(([k, a]) => [k, aggJson(a)]));
+
+// ---------------------------------------------------------------------------
+// CSV output (--csv): flat objects → RFC4180-ish CSV on stdout.
+// ---------------------------------------------------------------------------
+function csvEscape(v) {
+  const s = String(v ?? '');
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function outCsv(rows) {
+  if (!rows.length) return console.log('');
+  const cols = Object.keys(rows[0]);
+  console.log(cols.join(','));
+  for (const r of rows) console.log(cols.map(c => csvEscape(r[c])).join(','));
+}
 function totalJson(map) {
   const t = emptyAgg();
   for (const a of map.values()) for (const k of Object.keys(t)) t[k] += a[k];
@@ -1029,12 +1049,15 @@ async function localStatus() {
     if (v) return v;
   }
   const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
-  const sinceMs = Math.min(midnight.getTime(), Date.now() - STATUS_LOOKBACK_MS);
+  const mon = new Date(midnight); mon.setDate(mon.getDate() - (mon.getDay() + 6) % 7);
+  const sinceMs = Math.min(mon.getTime(), midnight.getTime(), Date.now() - STATUS_LOOKBACK_MS);
   const entries = await loadEntries({ sinceMs });
   const todayCost = entries.reduce((s, e) => s + (e.ts >= midnight.getTime() ? e.cost : 0), 0);
+  const weekCost = entries.reduce((s, e) => s + (e.ts >= mon.getTime() ? e.cost : 0), 0);
   const active = computeBlocks(entries).find(b => b.active);
   const status = {
     todayCost,
+    weekCost,
     block: active
       ? {
           startMs: active.startMs,
@@ -1082,7 +1105,9 @@ function userConfig() {
   return {};
 }
 
-const STATUS_SEGMENTS = ['model', 'cost', 'budget', '5h', '7d', 'ctx', 'burn', 'eta'];
+const STATUS_SEGMENTS = ['model', 'cost', 'week', 'budget', '5h', '7d', 'ctx', 'burn', 'eta'];
+// week is opt-in (statusline space is precious); everything else is on by default
+const DEFAULT_STATUS_SEGMENTS = ['model', 'cost', 'budget', '5h', '7d', 'ctx', 'burn', 'eta'];
 
 /** Validated statusline config with defaults (bad values fall back silently). */
 function statuslineConfig() {
@@ -1090,7 +1115,7 @@ function statuslineConfig() {
   const cfg = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
   let segments = Array.isArray(cfg.segments)
     ? cfg.segments.filter(s => STATUS_SEGMENTS.includes(s)) : [];
-  if (!segments.length) segments = STATUS_SEGMENTS;
+  if (!segments.length) segments = DEFAULT_STATUS_SEGMENTS;
   const separator = typeof cfg.separator === 'string' && cfg.separator.length ? cfg.separator : ' | ';
   // only accept actual numbers in [0,100] — Number(null/''/false) would coerce to 0
   const pctOpt = (v, def) =>
@@ -1134,6 +1159,10 @@ async function renderStatusline() {
       bits.push(`今日${fmtUSD(local.todayCost)}`);
       if (local.block) bits.push(`窗口${fmtUSD(local.block.cost)}`);
       return emo('💰') + bits.join(' / ');
+    },
+    week() {
+      if (!Number.isFinite(local.weekCost)) return null;
+      return `周${fmtUSD(local.weekCost)}`;
     },
     budget() {
       // daily budget warning (optional, from ~/.claude/usage-monitor.json)
@@ -1721,6 +1750,11 @@ async function periodReport(opts, { unit, count, keyFn, label }) {
     }
   }
   const keys = [...byPeriod.keys()].sort().slice(-count);
+  if (opts.csv) {
+    return outCsv(keys.map(k => ({
+      period: k, days_with_usage: byPeriod.get(k).days, ...aggJson(byPeriod.get(k).agg),
+    })));
+  }
   if (opts.json) {
     return out(keys.map(k => ({
       period: k, days_with_usage: byPeriod.get(k).days,
@@ -1771,6 +1805,7 @@ async function cmdProjects(opts) {
   const entries = await loadEntries({ sinceMs: Date.now() - days * 86400000 });
   const byProject = groupBy(entries, e => e.project);
   const sorted = [...byProject.entries()].sort((a, b) => b[1].cost - a[1].cost);
+  if (opts.csv) return outCsv(sorted.map(([p, a]) => ({ project: p, ...aggJson(a) })));
   if (opts.json) {
     return out(sorted.map(([p, a]) => ({ project: p, ...aggJson(a) })));
   }
@@ -1834,6 +1869,157 @@ async function cmdCache(opts) {
   footnotes();
 }
 
+// ---------------------------------------------------------------------------
+// Terminal heatmap: weekday × hour cost intensity over the last N days.
+// ---------------------------------------------------------------------------
+async function cmdHours(opts) {
+  const days = posInt(opts.days, 30);
+  const entries = await loadEntries({ sinceMs: Date.now() - days * 86400000 });
+  const heat = Array.from({ length: 7 }, () => Array(24).fill(0));
+  for (const e of entries) {
+    const d = new Date(e.ts);
+    heat[(d.getDay() + 6) % 7][d.getHours()] += e.cost;
+  }
+  if (opts.json) return out({ days, rows: '一二三四五六日', heat: heat.map(r => r.map(v => +v.toFixed(2))) });
+  header(`用量热力（星期×小时，最近${days}天，字符深浅=累计成本）`);
+  if (!entries.length) return console.log(C.dim('没有用量记录。'));
+  const maxV = Math.max(1e-9, ...heat.flat());
+  const RAMP = [' ', '·', '░', '▒', '▓', '█'];
+  // hour scale: a mark every 6 hours across 24 one-char cells
+  let scale = '';
+  for (let h = 0; h < 24; h++) scale += h % 6 === 0 ? String(h / 6 === 0 ? 0 : h).padEnd(1) : ' ';
+  console.log('　　　0     6     12    18      合计');
+  const names = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+  let peak = { v: 0, d: 0, h: 0 };
+  heat.forEach((row, d) => {
+    let cells = '';
+    row.forEach((v, h) => {
+      const lv = v <= 0 ? 0 : Math.max(1, Math.ceil(v / maxV * 5));
+      const ch = RAMP[lv];
+      cells += lv >= 4 ? C.cyan(ch) : lv >= 2 ? ch : C.dim(ch === ' ' ? '·' : ch);
+      if (v > peak.v) peak = { v, d, h };
+    });
+    const rowTotal = row.reduce((a, b) => a + b, 0);
+    const label = (d >= 5 ? C.yellow : C.dim)(names[d]);
+    console.log(`${label}　${cells}　${C.dim(fmtUSD(rowTotal).padStart(6))}`);
+  });
+  console.log('\n' + C.dim(`高峰时段：${names[peak.d]} ${peak.h}:00～${peak.h + 1}:00（累计${fmtUSD(peak.v)}）`));
+}
+
+// ---------------------------------------------------------------------------
+// Environment self-check: catches the classic "why didn't it take effect"
+// cases (stale installed version, config typos, missing data sources...).
+// ---------------------------------------------------------------------------
+async function cmdDoctor(opts) {
+  const checks = [];
+  const add = (status, name, detail) => checks.push({ status, name, detail });
+
+  // Node version
+  const nodeMajor = Number(process.versions.node.split('.')[0]);
+  add(nodeMajor >= 18 ? 'ok' : 'fail', 'Node版本',
+    `v${process.versions.node}${nodeMajor >= 18 ? '' : '（需要>=18）'}`);
+
+  // source vs installed plugin version
+  const selfDir = path.dirname(fileURLToPath(import.meta.url));
+  let srcVer = null;
+  try {
+    srcVer = JSON.parse(fs.readFileSync(path.join(selfDir, '..', '.claude-plugin', 'plugin.json'), 'utf8')).version;
+  } catch { /* not in a plugin tree */ }
+  const cacheRoot = path.join(os.homedir(), '.claude', 'plugins', 'cache', 'usage-monitor-market', 'usage-monitor');
+  let installed = [];
+  try { installed = fs.readdirSync(cacheRoot).sort(); } catch { /* not installed */ }
+  const latest = installed[installed.length - 1] || null;
+  const runningFromCache = selfDir.includes(path.join('plugins', 'cache'));
+  if (!latest) {
+    add('warn', '插件安装', '未在插件缓存中找到，可能以--plugin-dir方式运行');
+  } else if (srcVer && srcVer !== latest) {
+    add('warn', '版本一致性', `源码${srcVer}≠已安装${latest}——改动后需要marketplace update＋plugin update`);
+  } else {
+    add('ok', '版本', `已安装${latest}${runningFromCache ? '（当前即已安装副本）' : '（当前运行桌面源码）'}`);
+  }
+  add('warn', '生效提醒', '斜杠命令用的是会话启动时加载的版本——刚更新过插件必须重启会话才生效');
+
+  // transcripts
+  const files = transcriptFiles(0);
+  if (files.length) {
+    const newest = Math.max(...files.map(f => f.mtimeMs));
+    add('ok', '本地数据源', `${files.length}个会话记录文件，最新${fmtResetAt(newest)}`);
+  } else {
+    add('fail', '本地数据源', '找不到任何JSONL会话记录（检查CLAUDE_CONFIG_DIR）');
+  }
+
+  // credentials + official endpoint
+  if (oauthToken()) {
+    const data = await fetchOfficialUsage();
+    add(data.error ? 'warn' : 'ok', '官方限额接口',
+      data.error ? `查询失败（${data.error}），稍后自动重试` : '连通正常（订阅凭据有效）');
+  } else {
+    add('warn', '订阅凭据', '未找到.credentials.json——limits/预警不可用（API Key用户属正常）');
+  }
+
+  // config validation incl. unknown-key typo detection
+  const KNOWN_TOP = ['daily_budget_usd', 'statusline', 'hooks', 'sync_dir', 'sync_days',
+    'display', 'subscription_usd_per_month'];
+  let cfgFound = false;
+  for (const h of configHomes()) {
+    const f = path.join(h, 'usage-monitor.json');
+    if (!fs.existsSync(f)) continue;
+    cfgFound = true;
+    const o = readJsonObject(f);
+    if (!o) { add('fail', '配置文件', `${f} 不是合法JSON`); continue; }
+    const unknown = Object.keys(o).filter(k => !KNOWN_TOP.includes(k));
+    add(unknown.length ? 'warn' : 'ok', '配置文件',
+      unknown.length ? `${f} 含未知键（拼写错误？）：${unknown.join('、')}` : `${f} 合法`);
+    break;
+  }
+  if (!cfgFound) add('ok', '配置文件', '未创建（全部使用默认值，正常）');
+
+  // statusline wiring
+  const settings = readJsonObject(path.join(configHomes()[0], 'settings.json'));
+  const slCmd = settings?.statusLine?.command || '';
+  add(slCmd.includes('usage.mjs') ? 'ok' : 'warn', '状态栏',
+    slCmd.includes('usage.mjs') ? '已配置' : '未配置（可运行statusline-setup）');
+
+  // hooks + mcp in installed copy
+  if (latest) {
+    const base = path.join(cacheRoot, latest);
+    add(fs.existsSync(path.join(base, 'hooks', 'hooks.json')) ? 'ok' : 'warn',
+      '会话钩子', fs.existsSync(path.join(base, 'hooks', 'hooks.json')) ? '已注册（昨日小结＋限额预警）' : '安装副本中缺hooks.json');
+    add(fs.existsSync(path.join(base, '.mcp.json')) ? 'ok' : 'warn',
+      'MCP服务器', fs.existsSync(path.join(base, '.mcp.json')) ? '已注册（usage_*系列工具）' : '安装副本中缺.mcp.json');
+  }
+
+  // history warehouse & devices
+  const hist = readJsonObject(historyFile());
+  const histDays = Object.keys(hist?.days || {}).length;
+  const devs = Object.keys(hist?.devices || {});
+  add('ok', '历史仓库', `${histDays}天快照${devs.length ? `，已导入设备：${devs.join('、')}` : '，无导入设备'}`);
+
+  // sync dir (probed in a killable child so a dead network drive can't hang us)
+  const syncDir = String(userConfig().sync_dir || '').trim();
+  if (syncDir) {
+    const { spawnSync } = await import('node:child_process');
+    const r = spawnSync(process.execPath,
+      ['-e', `require('fs').statSync(${JSON.stringify(syncDir)})`],
+      { timeout: 3000, windowsHide: true });
+    add(r.status === 0 ? 'ok' : 'warn', '同步目录',
+      r.status === 0 ? `${syncDir} 可达` : `${syncDir} 3秒内不可达（网络盘离线？钩子已用后台子进程，不影响启动）`);
+  } else {
+    add('ok', '同步目录', '未配置（单机使用，正常）');
+  }
+
+  if (opts.json) return out({ checks });
+  header('环境自检（doctor）');
+  const badge = s => s === 'ok' ? C.green('正常') : s === 'warn' ? C.yellow('注意') : C.red('异常');
+  for (const c of checks) {
+    console.log(`${badge(c.status)}　${padEndDW(c.name, 12)} ${C.dim(c.detail)}`);
+  }
+  const n = { ok: 0, warn: 0, fail: 0 };
+  checks.forEach(c => n[c.status]++);
+  console.log('\n' + C.dim(`共${checks.length}项：`) + C.green(`${n.ok}正常`) +
+    C.dim('、') + C.yellow(`${n.warn}注意`) + C.dim('、') + C.red(`${n.fail}异常`));
+}
+
 /** mcp__server__tool → server:tool; keep built-in tool names as-is. */
 const shortTool = n => String(n).replace(/^mcp__(.+?)__/, '$1:');
 
@@ -1845,12 +2031,12 @@ async function cmdTools(opts) {
   toolSink.sinceMs = windowStart;
   await loadEntries({ sinceMs: windowStart - 3600000, toolSink });
   const sorted = [...toolSink.byName.entries()].sort((a, b) => b[1].count - a[1].count);
-  if (opts.json) {
-    return out(sorted.map(([name, s]) => ({
-      tool: name, calls: s.count, errors: s.errors,
-      error_rate: +(s.errors / Math.max(1, s.count)).toFixed(4),
-    })));
-  }
+  const flatTools = () => sorted.map(([name, s]) => ({
+    tool: name, calls: s.count, errors: s.errors,
+    error_rate: +(s.errors / Math.max(1, s.count)).toFixed(4),
+  }));
+  if (opts.csv) return outCsv(flatTools());
+  if (opts.json) return out(flatTools());
   header(`工具调用统计（最近${days}天）`);
   if (!sorted.length) return console.log(C.dim('该时间段内没有工具调用记录。'));
   const totalCalls = sorted.reduce((s, [, v]) => s + v.count, 0);
@@ -1896,14 +2082,22 @@ async function cmdAll(opts) {
   const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
   const limitEvents = [];
   const [entries, official] = await Promise.all([
-    loadEntries({ sinceMs: now - 30 * 86400000, limitEvents }),
+    loadEntries({ sinceMs: now - 32 * 86400000, limitEvents }), // 32d covers any full calendar month
     fetchOfficialUsage(),
   ]);
 
   const sum = since => entries.reduce((s, e) => s + (e.ts >= since ? e.cost : 0), 0);
   const today = sum(midnight.getTime());
   const week = sum(now - 7 * 86400000);
-  const month = entries.reduce((s, e) => s + e.cost, 0);
+  const month = sum(now - 30 * 86400000);
+  // calendar month-to-date + linear projection to month end
+  const mStart = new Date(); mStart.setHours(0, 0, 0, 0); mStart.setDate(1);
+  const mtd = sum(mStart.getTime());
+  const elapsedDays = Math.max(1 / 24, (now - mStart.getTime()) / 86400000);
+  const daysInMonth = new Date(mStart.getFullYear(), mStart.getMonth() + 1, 0).getDate();
+  const projMonth = mtd / elapsedDays * daysInMonth;
+  const subUsd = Number(userConfig().subscription_usd_per_month);
+  const subOk = Number.isFinite(subUsd) && subUsd > 0;
   // same-time-yesterday comparison (partial day vs partial day, fair)
   const y0 = midnight.getTime() - 86400000;
   const y1 = y0 + (now - midnight.getTime());
@@ -1963,6 +2157,11 @@ async function cmdAll(opts) {
         last_week_same_elapsed_usd: +weekLastSame.toFixed(2),
         last_week_usd: +weekLastFull.toFixed(2),
       },
+      month: {
+        month_to_date_usd: +mtd.toFixed(2),
+        projected_month_usd: +projMonth.toFixed(2),
+        subscription_multiple: subOk ? +(mtd / subUsd).toFixed(1) : null,
+      },
       cache_net_savings_30d_usd: +cacheSave.toFixed(2),
       official_limits: official.error ? { error: official.error } : official,
       active_block: active ? blockJson(active, now) : null,
@@ -1995,6 +2194,14 @@ async function cmdAll(opts) {
     if (d !== 0) weekCmp = C.dim('（较上周同期') + (d > 0 ? C.red(`↑${d}%`) : C.green(`↓${-d}%`)) + C.dim('）');
   }
   console.log(C.bold(emo('📅') + '本周　') + `${fmtUSD(weekThis)}${weekCmp}　·　上周全周${fmtUSD(weekLastFull)}`);
+
+  let monthLine = C.bold(emo('📆') + '本月　') +
+    `${fmtUSD(mtd)}（${new Date().getDate()}日）　·　按日均预计月底${fmtUSD(projMonth)}`;
+  if (subOk) {
+    const mult = mtd / subUsd;
+    monthLine += '　·　' + C.green(`等价API价值为订阅费的${mult >= 10 ? Math.round(mult) : mult.toFixed(1)}倍`);
+  }
+  console.log(monthLine);
 
   const budget = Number(userConfig().daily_budget_usd);
   if (Number.isFinite(budget) && budget > 0) {
@@ -2064,6 +2271,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--json') { opts.json = true; continue; }
+    if (a === '--csv') { opts.csv = true; continue; }
     if (a === '--no-open') { opts.noOpen = true; continue; }
     if (a === '--compact') { opts.compact = true; continue; }
     if (a === '--wide') { opts.wide = true; continue; }
@@ -2093,7 +2301,9 @@ const HELP = `claude-usage-monitor — Claude Code 用量统计
   weekly           按周报表          --weeks N（默认8，周一起算）
   monthly          按月报表          --months N（默认6）
   blocks           5小时限额窗口      --days N（默认3，滚动窗口）
-  models           全部历史按模型汇总
+  models           按模型汇总          --days N（省略=全部历史）
+  hours            用量热力：星期×小时高峰分析  --days N（默认30）
+  doctor           环境自检：版本/配置/数据源/钩子/同步逐项体检
   sessions         会话成本排行       --top N（默认10）--days N
   projects         按项目统计         --days N（默认30）--top N
   cache            缓存效率与节省      --days N（默认30）
@@ -2111,6 +2321,7 @@ const HELP = `claude-usage-monitor — Claude Code 用量统计
 
 选项:
   --json           输出 JSON（供程序读取）
+  --csv            输出 CSV（daily/weekly/monthly/models/sessions/projects/tools）
   --compact        紧凑列（窄终端自动开启，--wide 强制关闭）
 
 说明: daily/weekly/monthly 按本地自然日统计；blocks/sessions/projects 按
@@ -2131,6 +2342,7 @@ async function main() {
     projects: cmdProjects, cache: cmdCache, tools: cmdTools, limits: cmdLimits,
     report: cmdReport, statusline: cmdStatusline,
     export: cmdExport, import: cmdImport, sync: cmdSync, team: cmdTeam, forget: cmdForget,
+    hours: cmdHours, doctor: cmdDoctor,
     'hook-session-start': cmdHookSessionStart,
   };
   const fn = commands[cmd];

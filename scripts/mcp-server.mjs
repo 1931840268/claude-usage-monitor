@@ -38,6 +38,10 @@ const TOOLS = [
     description: '缓存效率：命中率、读省下、写溢价、净节省（days默认30）' },
   { name: 'usage_team', cmd: ['team'], args: ['days'],
     description: '团队视图：本机＋已同步设备/成员的成本汇总（days默认30）' },
+  { name: 'usage_hours', cmd: ['hours'], args: ['days'],
+    description: '用量热力：星期×小时的成本分布矩阵，找高峰时段（days默认30）' },
+  { name: 'usage_doctor', cmd: ['doctor'], args: [],
+    description: '插件环境自检：版本一致性、配置合法性、数据源、凭据、钩子、同步目录' },
 ];
 
 function schemaFor(t) {
