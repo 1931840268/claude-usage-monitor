@@ -183,6 +183,7 @@ Fable 5(xhigh) | 💰 会话$3.21 / 今日$142 / 窗口$139 | 5h 63% 剩2h05m(18
 - **状态栏不显示**：确认`~/.claude/settings.json`里`statusLine.command`的路径全部是正斜杠；插件更新后缓存路径可能变化，重跑`/usage-monitor:statusline-setup`即可。
 - **数据统计从哪天开始**：本地JSONL约保留30天；更早的数据依靠历史快照仓库（首次使用后开始积累）。
 - **未识别的模型**：不在内置价格表里的模型按$0计成本，报表末尾会给出黄色提示。
+- **经典conhost窗口下热力图错位**：老式控制台的中文点阵字体会把`·░▒▓█`按混合宽度渲染，`hours`热力图的行尾合计可能参差（表格类可用`display.ambiguous_wide`修正）。建议使用Windows Terminal/VS Code终端，渲染完全正常（实测验证）。
 
 ## 目录结构
 
