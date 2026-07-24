@@ -32,8 +32,13 @@
 | 按天/周/月报表 | 用量趋势、日均成本、主力模型、火花线趋势图、星期标注 |
 | 5小时窗口 | 本地估算的限额窗口、刷新时间、燃烧率、进度条与消耗预测（与ccusage算法一致） |
 | 官方限额 | 5小时/7天/各模型周配额的官方利用率、severity与刷新时间（Pro/Max订阅）；按当前速度的触顶预测 |
-| 会话钩子 | 会话启动时自动输出昨日小结＋限额预警（阈值可配，可关闭） |
-| MCP服务器 | 用量数据暴露为17个MCP工具，任何MCP客户端可查询（插件启用自动启动） |
+| 实时Web仪表盘 | `serve`一条命令起本地驾驶舱（127.0.0.1）：实时条含今日成本、燃烧率、限额窗口秒级倒计时，转写有新内容页面自动刷新 |
+| 子代理归因 | `agents`命令统计Task／Workflow子代理的真实花费（按类型排行＋单会话fan-out下钻），总额计入所有报表 |
+| 会话小票 | 会话结束自动结算：成本、活跃时长、编辑与返工率、缓存命中率、结束原因；`last`随时翻看，下次开屏一行摘要 |
+| 限流黑匣子 | StopFailure钩子实录每次真实限流/过载中断，`limits`／`errors`同屏对照「预测vs现实」 |
+| 预算熔断器 | 当日成本达预算80%软提醒；可选`budget_hard_cap`超支后直接拦截新提示词（内部出错一律放行） |
+| 会话钩子 | 会话启动时自动输出昨日小结＋限额预警＋上次会话小票（阈值可配，可关闭） |
+| MCP服务器 | 用量数据暴露为19个MCP工具，任何MCP客户端可查询（插件启用自动启动） |
 | 多设备同步 | 配置`sync_dir`共享目录后自动同步（钩子每6小时），`export`/`import`可手动合并 |
 | 团队视图 | `team`命令按设备/成员汇总成本；成员共用同一同步目录即得整队视图 |
 | 会话/项目排行 | 按成本排序的会话Top榜（含时长）与项目维度汇总 |
@@ -90,6 +95,9 @@ claude --plugin-dir ./claude-usage-monitor
 | `/usage-monitor:hours [天数]` | 星期×小时用量热力，找高峰时段 |
 | `/usage-monitor:context [天数]` | 上下文规模分析：成本花在哪个档位、最肥会话 |
 | `/usage-monitor:roi [天数]` | 效率分析：任务级成本、每$动作数、返工率 |
+| `/usage-monitor:agents [天数]` | 子代理成本归因：Task／Workflow代理花了多少、类型排行 |
+| `/usage-monitor:last [张数]` | 会话小票：上一场会话的成本/时长/编辑/返工率 |
+| `/usage-monitor:serve [端口]` | 启动本地实时Web仪表盘（默认3737端口） |
 | `/usage-monitor:plan` | 未来24小时限额规划（刷新时刻×历史高峰） |
 | `/usage-monitor:card` | 生成月度用量分享卡片（SVG） |
 | `/usage-monitor:advise` | 个性化省钱建议（缓存/上下文/触顶/模型组合） |
@@ -113,8 +121,15 @@ node scripts/usage.mjs report --days 30
 node scripts/usage.mjs daily --days 14 --json
 node scripts/usage.mjs limits --check; echo $?   # 0正常/10接近/11已达/1失败
 node scripts/usage.mjs live --interval 30        # 终端常驻实时仪表盘（Ctrl+C退出）
+node scripts/usage.mjs serve --port 3737         # 本地实时Web仪表盘（SSE自动刷新，Ctrl+C退出）
+node scripts/usage.mjs agents --days 7           # 子代理成本归因；--session <前缀>下钻
+node scripts/usage.mjs last --n 5                # 最近5张会话小票
 node scripts/usage.mjs prune --keep 365          # 清理一年前的历史快照
 ```
+
+实时Web仪表盘效果（合成演示数据）：
+
+<img src="docs/assets/serve.png" width="820" alt="serve实时仪表盘（合成演示数据）" />
 
 时间口径：daily/weekly/monthly按本地自然日统计；blocks/sessions/projects/tools按当前时刻回溯N×24小时。窄终端（低于100列）自动切换紧凑列，`--compact`强制开启、`--wide`强制关闭。
 
@@ -144,7 +159,8 @@ Fable 5(xhigh) | 💰 会话$3.21 / 今日$142 / 窗口$139 | 5h 63% 剩2h05m(18
 }
 ```
 
-- `daily_budget_usd`：当日成本达到预算80%时状态栏出现黄色「预算N%」，超过100%变红色「超预算」。
+- `daily_budget_usd`：当日成本达到预算80%时状态栏出现黄色「预算N%」，超过100%变红色「超预算」；同时预算守卫钩子会在你提交提示词时软提醒（30分钟最多一次）。
+- `budget_hard_cap`：设为`true`后，当日成本超过预算100%时直接拦截新提示词并说明解除方法（提高预算或删掉该项）。守卫内部出错时一律放行，绝不误伤正常使用。
 - `statusline.segments`：从model/cost/budget/5h/7d/ctx/burn/eta中挑选要显示的段，顺序即显示顺序；省略或留空显示全部（eta段仅在预计刷新前触顶时出现红色「⚠触顶约HH:MM」）。
 - `statusline.separator`：段间分隔符，默认`" | "`。
 - `statusline.warn_pct`/`danger_pct`：百分比着色阈值（达到warn变黄、达到danger变红），默认50/80；非法值自动回退。
@@ -153,12 +169,14 @@ Fable 5(xhigh) | 💰 会话$3.21 / 今日$142 / 窗口$139 | 5h 63% 剩2h05m(18
 - `subscription_usd_per_month`：填入订阅月费（如200），仪表盘「本月」行会显示等价API价值是订阅费的多少倍。
 - 所有报表命令支持`--csv`输出原始数值CSV（Excel直接用）；配置有拼写疑问随时跑`doctor`自检。
 
-## 会话启动钩子
+## 生命周期钩子
 
-插件注册了SessionStart钩子（`hooks/hooks.json`），每次新会话启动时自动运行：
+插件注册了4个钩子（`hooks/hooks.json`），覆盖会话全生命周期：
 
-- **每日小结**：当天第一次启动会话时，输出昨日的成本、较前日增减、请求数、主力模型与缓存净省各一行。
-- **限额预警**：任一官方限额窗口（5小时/7天/各模型周配额）达到阈值时输出预警与刷新时间。
+- **SessionStart（会话启动）**：当天第一次启动输出昨日小结（成本、较前日增减、请求数、主力模型、缓存净省）；每周第一次启动输出上周小结并后台存档周报HTML；任一官方限额窗口达到阈值时输出预警与刷新时间；上一场会话的小票摘要（每张只播一次）。
+- **SessionEnd（会话结束）**：自动结算会话小票——成本（子代理单列）、活跃时长（相邻请求间隔≤15分钟累计，不算挂机）、请求数、主力模型、工具/编辑/文件数、返工率、缓存命中率、结束原因，落盘`~/.claude/usage-monitor/receipts.json`（上限50张，resume会话自动替换旧票）。`usage last`随时翻看。
+- **StopFailure（回合中断）**：回合被限流/过载/账务等API错误打断时，实录进`stop-failures.jsonl`黑匣子（256KB自动轮转）。`limits`与`errors`用它对照「预测vs现实」。
+- **UserPromptSubmit（预算守卫）**：见上文`daily_budget_usd`／`budget_hard_cap`。
 
 在`~/.claude/usage-monitor.json`中可配置：
 
@@ -166,11 +184,11 @@ Fable 5(xhigh) | 💰 会话$3.21 / 今日$142 / 窗口$139 | 5h 63% 剩2h05m(18
 { "hooks": { "session_start": true, "limit_warn_pct": 80 } }
 ```
 
-`session_start`设为`false`整体关闭；`limit_warn_pct`调整预警阈值（1～100，默认80）。钩子30秒超时、出错静默，不会阻塞会话启动。
+`session_start`设为`false`关闭启动播报；`limit_warn_pct`调整预警阈值（1～100，默认80）。所有钩子超时10～30秒、出错静默，不会阻塞会话。
 
 ## MCP服务器
 
-插件捆绑了一个零依赖的stdio MCP服务器（`.mcp.json`注册，插件启用后自动启动），把用量数据暴露为17个MCP工具：`usage_dashboard`、`usage_today`、`usage_daily`、`usage_blocks`、`usage_limits`、`usage_tools`、`usage_sessions`、`usage_projects`、`usage_cache`、`usage_team`、`usage_hours`、`usage_doctor`、`usage_context`、`usage_advise`、`usage_errors`、`usage_roi`、`usage_plan`（均返回JSON，支持`days`/`top`数字参数）。在Claude Code里工具名形如`mcp__plugin_usage-monitor_usage__usage_dashboard`；也可以把同样的命令配置到Claude Desktop等其他MCP客户端查询本机用量。
+插件捆绑了一个零依赖的stdio MCP服务器（`.mcp.json`注册，插件启用后自动启动），把用量数据暴露为19个MCP工具：`usage_dashboard`、`usage_today`、`usage_daily`、`usage_blocks`、`usage_limits`、`usage_tools`、`usage_sessions`、`usage_projects`、`usage_cache`、`usage_team`、`usage_hours`、`usage_doctor`、`usage_context`、`usage_advise`、`usage_errors`、`usage_roi`、`usage_plan`、`usage_agents`、`usage_last`（均返回JSON，支持`days`/`top`/`n`数字参数）。在Claude Code里工具名形如`mcp__plugin_usage-monitor_usage__usage_dashboard`；也可以把同样的命令配置到Claude Desktop等其他MCP客户端查询本机用量。
 
 ## 多设备自动同步与团队视图
 
@@ -192,7 +210,7 @@ Fable 5(xhigh) | 💰 会话$3.21 / 今日$142 / 窗口$139 | 5h 63% 剩2h05m(18
 
 ## 工作原理
 
-- **数据源一（本地JSONL）**：Claude Code把每次API交互记录在`~/.claude/projects/<项目>/<会话>.jsonl`。本插件流式解析其中带`usage`字段的assistant条目，按`message.id + requestId`去重（流式写盘会产生重复行；与ccusage口径一致），聚合出token与成本。`CLAUDE_CONFIG_DIR`环境变量设置时覆盖默认目录（`~/.claude`与`~/.config/claude`）。
+- **数据源一（本地JSONL）**：Claude Code把每次API交互记录在`~/.claude/projects/<项目>/<会话>.jsonl`，Task／Workflow子代理另存于`<项目>/<会话>/subagents/**/agent-*.jsonl`。本插件两者都流式解析（子代理成本归因到父会话），按`message.id + requestId`去重（流式写盘会产生重复行；与ccusage口径一致），聚合出token与成本。`CLAUDE_CONFIG_DIR`环境变量设置时覆盖默认目录（`~/.claude`与`~/.config/claude`）。
 - **历史快照仓库**：运行daily/weekly/monthly时会把已完结日期的聚合结果快照到`~/.claude/usage-monitor/history.json`，本地日志被Claude Code清理（约30天）后，周报/月报自动用快照补齐。
 - **数据源二（官方接口）**：订阅账号的凭据存于`~/.claude/.credentials.json`，插件用它查询Anthropic官方用量接口，得到5小时/7天各窗口的真实利用率与刷新时间（结果缓存3分钟）。
 - **数据源三（状态栏stdin）**：Claude Code每次刷新状态栏时会通过stdin传入JSON（模型、会话成本、上下文占用、官方限额等），状态栏脚本优先使用这些官方字段。
@@ -215,12 +233,13 @@ claude-usage-monitor/
 ├─ .claude-plugin/
 │  ├─ plugin.json          插件清单
 │  └─ marketplace.json     本地插件市场清单
-├─ commands/               斜杠命令（23个）
+├─ commands/               斜杠命令（26个）
 ├─ .mcp.json               MCP服务器注册（插件启用自动启动）
 ├─ hooks/
-│  └─ hooks.json           SessionStart钩子注册（昨日小结＋限额预警）
+│  └─ hooks.json           4个钩子注册（SessionStart/SessionEnd/StopFailure/UserPromptSubmit）
 ├─ scripts/
 │  ├─ usage.mjs            核心引擎（零依赖Node脚本）
+│  ├─ serve.mjs            本地实时Web仪表盘（127.0.0.1，SSE）
 │  ├─ report.mjs           HTML报告生成器（手写SVG，零依赖）
 │  └─ mcp-server.mjs       MCP服务器（stdio JSON-RPC，零依赖）
 ├─ README.md

@@ -1,5 +1,16 @@
 # 更新日志
 
+## v1.2.0（2026-07-24）
+
+「眼前一亮」五件套（四视角多agent侦察21条提案中按wow×可行性选定，官方hooks文档逐项验真后实现）。
+
+- 子代理成本归因：修复漏记bug——新版Claude Code把Task/Workflow子代理转写存到`<会话>/subagents/**`，此前从未计入（实测本机565个转写、近7天$156被低估10.2%）；transcriptFiles现递归扫描并归因到父会话，所有命令的总额自动补齐。新增`agents`命令：按代理类型的成本/请求/主力模型排行，`--session <前缀>`下钻单会话fan-out成本树（workflow代理以运行id标识）。
+- 会话小票：新增SessionEnd钩子——会话结束时自动结算一张小票（成本/活跃时长/请求数/主力模型/编辑与文件数/返工率/缓存命中率/结束原因，子代理成本单列），落盘receipts.json（上限50张，resume会话自动替换旧票）；新增`last`命令查看（默认整张小票，`--n N`列表）；下次开屏SessionStart问候一行「上次会话」摘要（每张只播一次）。活跃时长=相邻请求间隔≤15分钟的累计，不算挂机。
+- 限流黑匣子：新增StopFailure钩子——回合被限流/过载/账务等错误打断时实录进stop-failures.jsonl（256KB自动轮转）；`errors`新增「真实中断史」分区与black_box JSON字段；`limits`在预测行下方并列「近7天实际被打断N次」，预测与现实闭环。
+- 预算熔断器：新增UserPromptSubmit钩子——当日成本达`daily_budget_usd`的80%时软提醒（30分钟节流），配`budget_hard_cap: true`后超100%直接拦截提交并给出解除方法；任何内部错误一律放行（fail-open），绝不挡正常使用。
+- serve实时Web仪表盘：`usage serve`一条命令在127.0.0.1起本地驾驶舱——顶部实时条（今日成本、燃烧率$/h、官方限额窗口带秒级倒计时、状态呼吸灯），下方完整HTML报告8图；转写变化经fs.watch＋SSE自动刷新（页面整刷≥90秒节流，亮暗主题经localStorage保留）；数据不出本机，Ctrl+C即停。修复String.replace特殊模式（`$'`）导致的注入损坏，Playwright实测实时条数值与倒计时逐秒走动。
+- 配套：`--lang`全覆盖新功能（en/zh）；HELP双语更新；新增3个斜杠命令（/agents /last /serve，共26个）；MCP新增usage_agents/usage_last（共19个工具）；hooks.json接入全部4个钩子事件。
+
 ## v1.1.0（2026-07-24）
 
 国际化与诚信版（基于四视角冷眼审计的全部裁决）。

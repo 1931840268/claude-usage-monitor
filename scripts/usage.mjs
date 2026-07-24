@@ -128,6 +128,12 @@ function transcriptFiles(sinceMs = 0) {
       let entries = [];
       try { entries = fs.readdirSync(projDir, { withFileTypes: true }); } catch { continue; }
       for (const e of entries) {
+        if (e.isDirectory()) {
+          // session dirs hold subagent transcripts (Task/Workflow agents) under
+          // <sessionId>/subagents/**/agent-*.jsonl — real API usage that must count
+          collectAgentFiles(path.join(projDir, e.name, 'subagents'), proj.name, e.name, sinceMs, files, 0);
+          continue;
+        }
         if (!e.isFile() || !e.name.endsWith('.jsonl')) continue;
         const full = path.join(projDir, e.name);
         try {
@@ -138,6 +144,24 @@ function transcriptFiles(sinceMs = 0) {
     }
   }
   return files;
+}
+
+/** Recursively collect agent-*.jsonl under a session's subagents dir (depth-capped). */
+function collectAgentFiles(dir, project, session, sinceMs, out, depth) {
+  if (depth > 4) return;
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) { collectAgentFiles(full, project, session, sinceMs, out, depth + 1); continue; }
+    if (!e.isFile() || !e.name.startsWith('agent-') || !e.name.endsWith('.jsonl')) continue;
+    try {
+      const st = fs.statSync(full);
+      if (st.mtimeMs >= sinceMs) {
+        out.push({ file: full, project, mtimeMs: st.mtimeMs, agent: true, parentSession: session });
+      }
+    } catch { /* ignore */ }
+  }
 }
 
 /** Fresh accumulator for tool-call statistics (see loadEntries toolSink). */
@@ -200,10 +224,10 @@ const LIMIT_EVENT_RE = /usage limit reached\|(\d{9,13})/i;
  *   toolSink (from newToolSink()) — tool_use/tool_result frequency;
  *   limitEvents (array) — {ts, resetTs} for official rate-limit hits.
  */
-async function loadEntries({ sinceMs = 0, toolSink = null, limitEvents = null, apiErrors = null } = {}) {
+async function loadEntries({ sinceMs = 0, toolSink = null, limitEvents = null, apiErrors = null, files = null } = {}) {
   const seen = new Set();
   const entries = [];
-  for (const { file, project } of transcriptFiles(sinceMs)) {
+  for (const { file, project, agent, parentSession } of files ?? transcriptFiles(sinceMs)) {
     const rl = readline.createInterface({
       input: fs.createReadStream(file, { encoding: 'utf8' }),
       crlfDelay: Infinity,
@@ -246,14 +270,19 @@ async function loadEntries({ sinceMs = 0, toolSink = null, limitEvents = null, a
       }
       const model = j.message.model || 'unknown';
       if (model === '<synthetic>') continue; // internal placeholder rows
-      entries.push({
+      const entry = {
         ts,
         model,
         usage: u,
         cost: typeof j.costUSD === 'number' ? j.costUSD : costOf(model, u, ts),
-        sessionId: j.sessionId || path.basename(file, '.jsonl'),
+        // agent transcripts carry the PARENT session id, so their cost rolls up
+        // into the spawning session; fall back to the session dir name, never
+        // the agent-xxx basename (would fabricate phantom sessions)
+        sessionId: j.sessionId || (agent ? parentSession : path.basename(file, '.jsonl')),
         project,
-      });
+      };
+      if (agent) { entry.agent = true; entry.agentId = j.agentId || path.basename(file, '.jsonl').replace(/^agent-/, ''); entry.agentFile = file; }
+      entries.push(entry);
     }
   }
   entries.sort((a, b) => a.ts - b.ts);
@@ -1122,6 +1151,14 @@ async function cmdLimits(opts) {
     : C.dim(L('接口未返回任何限额窗口数据。', 'The endpoint returned no limit windows.')));
   const eta = fiveHourEtaLine(data);
   if (eta) console.log(eta);
+  // black box: prediction above, reality below
+  const hits = stopFailuresSince(Date.now() - 7 * 86400000)
+    .filter(b => b.type === 'rate_limit' || b.type === 'overloaded');
+  if (hits.length) {
+    console.log(C.yellow(L(`近7天实际被打断${hits.length}次（限流/过载，StopFailure黑匣子实录）`,
+      `${hits.length} real aborts in the last 7d (rate-limit/overload, from the StopFailure black box)`)) +
+      C.dim(L(`，最近一次${fmtResetAt(hits[hits.length - 1].ts)}`, `, latest ${fmtResetAt(hits[hits.length - 1].ts)}`)));
+  }
   const extra = data.extra_usage;
   if (extra && extra.is_enabled) {
     console.log('\n' + C.bold(L('额外用量（超额付费）：', 'Extra usage (overage): ')) +
@@ -1451,6 +1488,17 @@ async function cmdHookSessionStart() {
       } catch { /* best effort */ }
     }
 
+    // 1c) receipt of the previous session (each receipt announced once)
+    try {
+      const rcpts = readJsonObject(receiptsFile())?.receipts;
+      const r = Array.isArray(rcpts) && rcpts.length ? rcpts[rcpts.length - 1] : null;
+      if (r && now - r.endTs < 48 * 3600000 && state.last_receipt_shown !== r.sid) {
+        lines.push(emo('🧾') + L('上次会话：', 'Last session: ') + receiptSummary(r));
+        state.last_receipt_shown = r.sid;
+        stateDirty = true;
+      }
+    } catch { /* best effort */ }
+
     // 2) limit warning when any official window is at/over the threshold
     const rawPct = cfg.limit_warn_pct;
     const warnPct = typeof rawPct === 'number' && Number.isFinite(rawPct)
@@ -1489,6 +1537,207 @@ async function cmdHookSessionStart() {
     }
     if (lines.length) console.log(lines.join('\n'));
   } catch { /* a hook must never break session startup */ }
+}
+
+// ---------------------------------------------------------------------------
+// Session receipts — settled by the SessionEnd hook, viewed with `usage last`.
+// ---------------------------------------------------------------------------
+const receiptsFile = () => path.join(configHomes()[0], 'usage-monitor', 'receipts.json');
+
+/** Settle one session (parent transcript + its subagents) into a receipt. */
+async function settleSession(sessionId, transcriptPath) {
+  const st = fs.statSync(transcriptPath); // throws if the transcript is gone
+  const project = path.basename(path.dirname(transcriptPath));
+  const files = [{ file: transcriptPath, project, mtimeMs: st.mtimeMs }];
+  collectAgentFiles(path.join(path.dirname(transcriptPath), sessionId, 'subagents'),
+    project, sessionId, 0, files, 0);
+  const toolSink = newToolSink();
+  toolSink.perSession = new Map();
+  const entries = await loadEntries({ files, toolSink });
+  if (!entries.length) return null;
+  let cost = 0, agentCost = 0, cacheRead = 0, input = 0;
+  const models = new Map();
+  let active = 0, prevTs = 0;
+  for (const e of entries) {
+    cost += e.cost;
+    if (e.agent) agentCost += e.cost;
+    models.set(e.model, (models.get(e.model) || 0) + e.cost);
+    cacheRead += e.usage.cache_read_input_tokens || 0;
+    input += e.usage.input_tokens || 0;
+    // active time = sum of gaps ≤15min between consecutive requests
+    // (wall-clock span counts idle terminals; this number is honest)
+    if (prevTs) active += Math.min(e.ts - prevTs, 15 * 60000);
+    prevTs = e.ts;
+  }
+  const ps = toolSink.perSession.get(sessionId) || { ops: 0, edits: 0, files: new Map() };
+  const uniq = ps.files.size;
+  const top = [...models.entries()].sort((a, b) => b[1] - a[1])[0];
+  return {
+    sid: sessionId, project,
+    startTs: entries[0].ts, endTs: entries[entries.length - 1].ts, activeMs: active,
+    cost: +cost.toFixed(4), agentCost: +agentCost.toFixed(4), reqs: entries.length,
+    topModel: shortModel(top?.[0] || ''),
+    ops: ps.ops, edits: ps.edits, files: uniq,
+    rework: ps.edits > 0 ? +(1 - uniq / ps.edits).toFixed(3) : 0,
+    cacheHitPct: input + cacheRead > 0 ? Math.round(cacheRead / (input + cacheRead) * 100) : 0,
+    title: await sessionTitle(transcriptPath, 60),
+  };
+}
+
+/** SessionEnd hook: settle the finished session into the receipts ledger. */
+async function cmdHookSessionEnd() {
+  try {
+    const hook = await readStdinJson();
+    const sid = hook.session_id, tp = hook.transcript_path;
+    if (!sid || !tp) return;
+    const r = await settleSession(sid, tp);
+    if (!r || (r.cost < 0.01 && r.reqs < 3)) return; // skip empty/noise sessions
+    r.reason = typeof hook.reason === 'string' ? hook.reason : 'other';
+    const file = receiptsFile();
+    const cur = readJsonObject(file) || {};
+    const list = Array.isArray(cur.receipts) ? cur.receipts : [];
+    const idx = list.findIndex(x => x && x.sid === r.sid);
+    if (idx >= 0) list.splice(idx, 1); // resumed session: replace its old receipt
+    list.push(r);
+    while (list.length > 50) list.shift();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    writeCacheAtomic(file, { receipts: list });
+  } catch { /* SessionEnd output is ignored; never throw */ }
+}
+
+const RECEIPT_REASON = r => ({
+  clear: '/clear', resume: 'resume', logout: L('登出', 'logout'),
+  prompt_input_exit: L('退出', 'exit'), bypass_permissions_disabled: 'bypass-off',
+}[r] || L('结束', 'end'));
+
+function receiptSummary(r) {
+  const files = r.files ? L(`改${r.files}个文件`, `${r.files} files touched`) : L('无编辑', 'no edits');
+  const rw = r.edits >= 5 && r.rework >= 0.5 ? L(`，返工率${Math.round(r.rework * 100)}%`, `, rework ${Math.round(r.rework * 100)}%`) : '';
+  return L(
+    `${r.title || prettyProject(r.project)}——${fmtUSD(r.cost)}·${fmtDuration(r.activeMs)}·${files}${rw}（${RECEIPT_REASON(r.reason)}）`,
+    `${r.title || prettyProject(r.project)} — ${fmtUSD(r.cost)} · ${fmtDuration(r.activeMs)} · ${files}${rw} (${RECEIPT_REASON(r.reason)})`);
+}
+
+async function cmdLast(opts) {
+  const n = posInt(opts.n, 1);
+  const list = (readJsonObject(receiptsFile())?.receipts || []).filter(Boolean);
+  if (opts.json) return out(list.slice(-Math.max(n, 1)).reverse());
+  header(L('会话小票', 'Session receipts'));
+  if (!list.length) {
+    return console.log(C.dim(L(
+      '还没有小票。会话结束时由SessionEnd钩子自动结算——启用本插件后结束的会话才会出现。',
+      'No receipts yet. The SessionEnd hook settles each session when it ends — sessions closed after enabling this plugin will show up here.')));
+  }
+  const hm = ts => { const d = new Date(ts); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+  if (n <= 1) {
+    const r = list[list.length - 1];
+    const lab = (zh, en) => C.dim(padEndDW(L(zh, en), 9));
+    const rw = r.edits ? `${Math.round(r.rework * 100)}%` : '—';
+    const rwCell = r.edits >= 5 && r.rework >= 0.5 ? C.yellow(rw + L('（值得复盘）', ' (worth a retro)')) : rw;
+    const agent = r.agentCost > 0.005 ? L(`（含子代理${fmtUSD(r.agentCost)}）`, ` (incl. subagents ${fmtUSD(r.agentCost)})`) : '';
+    const endDay = localDate(r.endTs) !== localDate(r.startTs) ? localDate(r.endTs).slice(5) + ' ' : '';
+    console.log([
+      lab('任务', 'Task') + (r.title || C.dim('—')),
+      lab('项目', 'Project') + prettyProject(r.project),
+      lab('时间', 'When') + `${localDate(r.startTs)} ${hm(r.startTs)}～${endDay}${hm(r.endTs)}` +
+        L(`（活跃${fmtDuration(r.activeMs)}，${RECEIPT_REASON(r.reason)}结束）`,
+          ` (active ${fmtDuration(r.activeMs)}, ${RECEIPT_REASON(r.reason)})`),
+      lab('成本', 'Cost') + `${fmtUSD(r.cost)}${agent}·${r.reqs}${L('次请求', ' reqs')}·${L('主力', 'top ')}${r.topModel}`,
+      lab('动作', 'Actions') + L(`工具${r.ops}次·编辑${r.edits}次/${r.files}个文件·返工率`,
+        `${r.ops} tool calls · ${r.edits} edits/${r.files} files · rework `) + rwCell,
+      lab('缓存', 'Cache') + L(`命中率${r.cacheHitPct}%`, `${r.cacheHitPct}% hit rate`),
+    ].join('\n'));
+    if (list.length > 1) {
+      console.log('\n' + C.dim(L(`还有${list.length - 1}张历史小票：usage last --n ${Math.min(list.length, 10)}`,
+        `${list.length - 1} older receipts: usage last --n ${Math.min(list.length, 10)}`)));
+    }
+    return;
+  }
+  const t = [[L('结束于', 'Ended'), L('任务', 'Task'), L('活跃', 'Active'), L('成本', 'Cost'), L('返工', 'Rework'), L('原因', 'Why')]];
+  for (const r of list.slice(-n).reverse()) {
+    const rw = r.edits ? Math.round(r.rework * 100) + '%' : '—';
+    t.push([`${localDate(r.endTs).slice(5)} ${hm(r.endTs)}`, fitDW(r.title || prettyProject(r.project), 26),
+      fmtDuration(r.activeMs), fmtUSD(r.cost),
+      r.edits >= 5 && r.rework >= 0.5 ? C.yellow(rw) : C.dim(rw), RECEIPT_REASON(r.reason)]);
+  }
+  console.log(table(t, { aligns: ['l', 'l', 'r', 'r', 'r', 'l'] }));
+}
+
+// ---------------------------------------------------------------------------
+// Stop-failure black box — real API aborts recorded by the StopFailure hook.
+// Everyone estimates limits; this ledger records when you actually hit them.
+// ---------------------------------------------------------------------------
+const stopFailuresFile = () => path.join(configHomes()[0], 'usage-monitor', 'stop-failures.jsonl');
+
+async function cmdHookStopFailure() {
+  try {
+    const hook = await readStdinJson();
+    const type = typeof hook.error_type === 'string' && hook.error_type ? hook.error_type : 'unknown';
+    const file = stopFailuresFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.appendFileSync(file, JSON.stringify({
+      ts: Date.now(), type, sid: String(hook.session_id || '').slice(0, 8),
+    }) + '\n');
+    // keep the ledger bounded (best effort rotation)
+    if (fs.statSync(file).size > 256 * 1024) {
+      const lines = fs.readFileSync(file, 'utf8').trim().split('\n');
+      fs.writeFileSync(file, lines.slice(-1000).join('\n') + '\n');
+    }
+  } catch { /* StopFailure output is ignored; never throw */ }
+}
+
+/** Black-box events since a timestamp (missing/corrupt ledger → []). */
+function stopFailuresSince(sinceMs) {
+  const events = [];
+  let text = '';
+  try { text = fs.readFileSync(stopFailuresFile(), 'utf8'); } catch { return events; }
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    try {
+      const o = JSON.parse(line);
+      if (o && Number(o.ts) >= sinceMs) events.push(o);
+    } catch { /* skip corrupt line */ }
+  }
+  return events;
+}
+
+// ---------------------------------------------------------------------------
+// Budget guard — UserPromptSubmit hook. Soft warning at 80% of the daily
+// budget, optional hard block at 100% (budget_hard_cap: true). Fails open:
+// any error here must never get between the user and their prompt.
+// ---------------------------------------------------------------------------
+async function cmdHookPromptGuard() {
+  try {
+    const cfgAll = userConfig();
+    const budget = Number(cfgAll.daily_budget_usd);
+    if (!Number.isFinite(budget) || budget <= 0) return;
+    await readStdinJson(); // drain the payload; content unused
+    const local = await localStatus();
+    const spent = Number(local.todayCost) || 0;
+    const pct = Math.round(spent / budget * 100);
+    if (pct < 80) return;
+    if (pct >= 100 && cfgAll.budget_hard_cap === true) {
+      console.log(JSON.stringify({
+        decision: 'block',
+        reason: L(
+          `今日预算$${budget}已用尽（实际${fmtUSD(spent)}）。提高usage-monitor.json的daily_budget_usd或去掉budget_hard_cap后可继续。`,
+          `Daily budget $${budget} is exhausted (spent ${fmtUSD(spent)}). Raise daily_budget_usd or remove budget_hard_cap in usage-monitor.json to continue.`),
+      }));
+      return;
+    }
+    // soft warning, throttled to once per 30 minutes
+    const state = readJsonObject(stateFile()) || {};
+    const now = Date.now();
+    if (now - (Number(state.budget_warned_at) || 0) < 30 * 60000) return;
+    state.budget_warned_at = now;
+    fs.mkdirSync(path.dirname(stateFile()), { recursive: true });
+    writeCacheAtomic(stateFile(), state);
+    console.log(JSON.stringify({
+      systemMessage: L(
+        `${pct >= 100 ? '已超' : '接近'}今日预算：${fmtUSD(spent)}／$${budget}（${pct}%）`,
+        `${pct >= 100 ? 'Over' : 'Approaching'} today's budget: ${fmtUSD(spent)} / $${budget} (${pct}%)`),
+    }));
+  } catch { /* fail open */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -2136,6 +2385,111 @@ async function cmdRoi(opts) {
 }
 
 // ---------------------------------------------------------------------------
+// Subagent cost attribution: what Task/Workflow agents spend inside sessions.
+// ---------------------------------------------------------------------------
+const _agentMetaCache = new Map();
+/** agentType/description from the sibling agent-*.meta.json (best effort). */
+function agentMeta(file) {
+  let v = _agentMetaCache.get(file);
+  if (!v) {
+    const m = readJsonObject(file.replace(/\.jsonl$/, '.meta.json')) || {};
+    v = {
+      type: typeof m.agentType === 'string' && m.agentType ? m.agentType : null,
+      desc: typeof m.description === 'string' ? m.description : '',
+    };
+    _agentMetaCache.set(file, v);
+  }
+  return v;
+}
+
+async function cmdAgents(opts) {
+  const days = posInt(opts.days, 7);
+  const sinceMs = Date.now() - days * 86400000;
+  const entries = await loadEntries({ sinceMs });
+  let mainCost = 0, agentCost = 0, agentReqs = 0;
+  const byAgent = new Map(); // agentId -> {cost, count, file, sessionId, models}
+  for (const e of entries) {
+    if (!e.agent) { mainCost += e.cost; continue; }
+    agentCost += e.cost; agentReqs += 1;
+    let a = byAgent.get(e.agentId);
+    if (!a) byAgent.set(e.agentId, a = { cost: 0, count: 0, file: e.agentFile, sessionId: e.sessionId, models: new Map() });
+    a.cost += e.cost; a.count += 1;
+    a.models.set(e.model, (a.models.get(e.model) || 0) + e.cost);
+  }
+  const unknownT = L('(未知)', '(unknown)');
+  const byType = new Map(); // agentType -> {agents, cost, count, models}
+  for (const a of byAgent.values()) {
+    const type = agentMeta(a.file).type || unknownT;
+    let t = byType.get(type);
+    if (!t) byType.set(type, t = { agents: 0, cost: 0, count: 0, models: new Map() });
+    t.agents += 1; t.cost += a.cost; t.count += a.count;
+    for (const [m, c] of a.models) t.models.set(m, (t.models.get(m) || 0) + c);
+  }
+  const total = mainCost + agentCost;
+  const pct = total > 0.005 ? Math.round(agentCost / total * 100) : 0;
+  const topModel = models => shortModel([...models].sort((x, y) => y[1] - x[1])[0]?.[0] || '') || '—';
+
+  if (opts.session) {
+    // fan-out drill-down for one session (id prefix)
+    const pre = String(opts.session);
+    const list = [...byAgent.entries()].filter(([, a]) => a.sessionId.startsWith(pre));
+    if (opts.json) {
+      return out(list.map(([id, a]) => ({
+        agent_id: id, session_id: a.sessionId, agent_type: agentMeta(a.file).type,
+        description: agentMeta(a.file).desc || null,
+        cost_usd: +a.cost.toFixed(4), requests: a.count, top_model: topModel(a.models),
+      })));
+    }
+    header(L(`会话${pre}…的子代理成本树（近${days}天）`, `Subagent fan-out for session ${pre}… (last ${days}d)`));
+    if (!list.length) return console.log(C.dim(L('该会话没有子代理记录。', 'No subagents recorded for this session.')));
+    const sMain = entries.filter(e => !e.agent && e.sessionId.startsWith(pre)).reduce((s, e) => s + e.cost, 0);
+    const sAgent = list.reduce((s, [, a]) => s + a.cost, 0);
+    console.log(L(`主线${fmtUSD(sMain)}＋子代理${fmtUSD(sAgent)}（${list.length}个）\n`,
+      `main loop ${fmtUSD(sMain)} + subagents ${fmtUSD(sAgent)} (${list.length})\n`));
+    const t = [[L('类型', 'Type'), L('任务', 'Task'), L('请求', 'Reqs'), L('模型', 'Model'), L('成本', 'Cost')]];
+    for (const [, a] of list.sort((x, y) => y[1].cost - x[1].cost).slice(0, 20)) {
+      const m = agentMeta(a.file);
+      // workflow agents carry no description — label them by their run id instead
+      const wf = /[\\/]workflows[\\/](wf_[^\\/]+)[\\/]/.exec(a.file);
+      t.push([fitDW(m.type || unknownT, 18), fitDW(m.desc || (wf ? wf[1] : '—'), 24),
+        String(a.count), topModel(a.models), fmtUSD(a.cost)]);
+    }
+    console.log(table(t, { aligns: ['l', 'l', 'r', 'l', 'r'] }));
+    return;
+  }
+
+  if (opts.json) {
+    return out({
+      days, total_cost_usd: +total.toFixed(2), main_cost_usd: +mainCost.toFixed(2),
+      agent_cost_usd: +agentCost.toFixed(2), agent_share_pct: pct,
+      agents: byAgent.size, agent_requests: agentReqs,
+      by_type: [...byType.entries()].sort((a, b) => b[1].cost - a[1].cost).map(([type, t]) => ({
+        agent_type: type, agents: t.agents, requests: t.count,
+        cost_usd: +t.cost.toFixed(2), top_model: topModel(t.models),
+      })),
+    });
+  }
+  header(L(`子代理成本归因（近${days}天）`, `Subagent cost attribution (last ${days}d)`));
+  if (!byAgent.size) {
+    return console.log(C.dim(L('近期没有子代理（Task／Workflow）用量记录。',
+      'No subagent (Task/Workflow) usage recorded recently.')));
+  }
+  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  console.log(L(
+    `子代理花费${fmtUSD(agentCost)}，占总成本${pct}%（${byAgent.size}个代理／${agentReqs}次请求）；主会话直属${fmtUSD(mainCost)}。\n`,
+    `Subagents spent ${fmtUSD(agentCost)} — ${pct}% of total (${plural(byAgent.size, 'agent')} / ${plural(agentReqs, 'request')}); main loop ${fmtUSD(mainCost)}.\n`));
+  const t = [[L('类型', 'Type'), L('代理数', 'Agents'), L('请求', 'Reqs'), L('主力模型', 'Top model'), L('成本', 'Cost'), L('占比', 'Share')]];
+  for (const [type, tt] of [...byType.entries()].sort((a, b) => b[1].cost - a[1].cost).slice(0, 15)) {
+    t.push([fitDW(type, 20), String(tt.agents), String(tt.count), topModel(tt.models),
+      fmtUSD(tt.cost), C.dim((agentCost > 0.005 ? Math.round(tt.cost / agentCost * 100) : 0) + '%')]);
+  }
+  console.log(table(t, { aligns: ['l', 'r', 'r', 'l', 'r', 'r'] }));
+  console.log('\n' + C.dim(L(
+    '提示：usage agents --session <会话id前缀> 可下钻单个会话的fan-out成本树。',
+    'Tip: usage agents --session <session id prefix> drills into one session\'s fan-out tree.')));
+}
+
+// ---------------------------------------------------------------------------
 // API error diagnostics: classify isApiErrorMessage transcript rows.
 // ---------------------------------------------------------------------------
 function classifyApiError(text) {
@@ -2159,35 +2513,55 @@ async function cmdErrors(opts) {
     byType.set(k, (byType.get(k) || 0) + 1);
   }
   const sorted = [...byType.entries()].sort((a, b) => b[1] - a[1]);
+  const blackBox = stopFailuresSince(Date.now() - days * 86400000);
   if (opts.json) {
+    const bbTypes = {};
+    for (const b of blackBox) bbTypes[b.type] = (bbTypes[b.type] || 0) + 1;
     return out({
       days, total: apiErrors.length,
       by_type: Object.fromEntries(sorted),
       recent: apiErrors.slice(-10).map(e => ({
         time: new Date(e.ts).toISOString(), type: classifyApiError(e.text), text: e.text.slice(0, 120),
       })),
+      black_box: { total: blackBox.length, by_type: bbTypes },
     });
   }
   header(`API错误诊断（最近${days}天）`);
-  if (!apiErrors.length) return console.log(C.green('该时间段内没有任何API错误，链路健康。'));
-  const rows = [['类型', '次数', '占比']];
-  for (const [k, n] of sorted) {
-    rows.push([k, String(n), C.dim(Math.round(n / apiErrors.length * 100) + '%')]);
+  if (!apiErrors.length && !blackBox.length) {
+    return console.log(C.green('该时间段内没有任何API错误，链路健康。'));
   }
-  console.log(table(rows));
-  // daily trend sparkline
-  const buckets = Array(days).fill(0);
-  const start = Date.now() - days * 86400000;
-  for (const e of apiErrors) {
-    const i = Math.min(days - 1, Math.floor((e.ts - start) / 86400000));
-    if (i >= 0) buckets[i] += 1;
+  if (!apiErrors.length) console.log(C.green('转写中没有API错误记录。'));
+  if (apiErrors.length) {
+    const rows = [['类型', '次数', '占比']];
+    for (const [k, n] of sorted) {
+      rows.push([k, String(n), C.dim(Math.round(n / apiErrors.length * 100) + '%')]);
+    }
+    console.log(table(rows));
+    // daily trend sparkline
+    const buckets = Array(days).fill(0);
+    const start = Date.now() - days * 86400000;
+    for (const e of apiErrors) {
+      const i = Math.min(days - 1, Math.floor((e.ts - start) / 86400000));
+      if (i >= 0) buckets[i] += 1;
+    }
+    console.log(`\n${C.bold('按天分布')} ${C.cyan(sparkline(buckets))} ` +
+      C.dim(`共${apiErrors.length}次，最近一次${fmtResetAt(apiErrors[apiErrors.length - 1].ts)}`));
+    console.log('\n' + C.bold('最近5条：'));
+    for (const e of apiErrors.slice(-5)) {
+      console.log(C.dim(`　${fmtResetAt(e.ts)}　`) + C.yellow(`[${classifyApiError(e.text)}]`) +
+        C.dim(` ${e.text.replace(/\s+/g, ' ').slice(0, 70)}`));
+    }
   }
-  console.log(`\n${C.bold('按天分布')} ${C.cyan(sparkline(buckets))} ` +
-    C.dim(`共${apiErrors.length}次，最近一次${fmtResetAt(apiErrors[apiErrors.length - 1].ts)}`));
-  console.log('\n' + C.bold('最近5条：'));
-  for (const e of apiErrors.slice(-5)) {
-    console.log(C.dim(`　${fmtResetAt(e.ts)}　`) + C.yellow(`[${classifyApiError(e.text)}]`) +
-      C.dim(` ${e.text.replace(/\s+/g, ' ').slice(0, 70)}`));
+  // black box: hard aborts as recorded by the StopFailure hook (facts, not parsing)
+  if (blackBox.length) {
+    const byT = new Map();
+    for (const b of blackBox) byT.set(b.type, (byT.get(b.type) || 0) + 1);
+    console.log('\n' + C.bold('真实中断史（StopFailure黑匣子）'));
+    for (const [k, cnt] of [...byT.entries()].sort((a, b) => b[1] - a[1])) {
+      console.log(`　${padEndDW(k, 20)} ${String(cnt).padStart(3)}次`);
+    }
+    console.log(C.dim(`　最近一次${fmtResetAt(blackBox[blackBox.length - 1].ts)}` +
+      '（钩子实录的回合中断事件，与上方转写解析相互印证）'));
   }
 }
 
@@ -2715,6 +3089,15 @@ async function cmdTools(opts) {
     `${totalErr}次出错（整体错误率${Math.round(totalErr / Math.max(1, totalCalls) * 100)}%）${restNote}`));
 }
 
+async function cmdServe(opts) {
+  const { startServe } = await import('./serve.mjs');
+  await startServe({
+    port: posInt(opts.port, 3737),
+    days: posInt(opts.days, 30),
+    open: !opts.noOpen,
+  });
+}
+
 async function cmdReport(opts) {
   const { generateReport } = await import('./report.mjs');
   await generateReport({
@@ -2931,7 +3314,7 @@ async function cmdAll(opts) {
 // ---------------------------------------------------------------------------
 function parseArgs(argv) {
   const opts = { _: [] };
-  const num = ['days', 'top', 'weeks', 'months', 'interval', 'keep'];
+  const num = ['days', 'top', 'weeks', 'months', 'interval', 'keep', 'n', 'port'];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--json') { opts.json = true; continue; }
@@ -2947,6 +3330,7 @@ function parseArgs(argv) {
     if (a === '--wide') { opts.wide = true; continue; }
     if (a === '--check') { opts.check = true; continue; }
     if (a === '--out') { opts.out = argv[++i]; continue; }
+    if (a === '--session') { opts.session = argv[++i]; continue; }
     const m = a.match(/^--([a-z]+)(?:=(.*))?$/);
     if (m && num.includes(m[1])) {
       opts[m[1]] = Number(m[2] !== undefined ? m[2] : argv[++i]);
@@ -2974,10 +3358,13 @@ Commands:
   sessions         top sessions with task titles   --top N --days N
   roi              efficiency: actions per $, rework rate   --days N
   plan             next-24h limit planner (resets × your peak hours)
+  agents           subagent cost attribution (Task/Workflow)   --session <prefix> drills down
+  last             receipt of your last session   --n N lists recent receipts
+  serve            live local web dashboard at 127.0.0.1   --port N (default 3737)
   hours            weekday × hour heatmap    --days N (default 30)
   context          context-size cost analysis --days N (default 7)
   advise           personalized savings advice
-  errors           API error taxonomy        --days N (default 7)
+  errors           API error taxonomy + StopFailure black box   --days N (default 7)
   projects / cache / tools / team / card / live / doctor / prune
   limits           official rate limits (Pro/Max)   --check adds exit codes
   report           self-contained HTML report --days N --out path --no-open
@@ -3009,6 +3396,12 @@ const HELP = `claude-usage-monitor — Claude Code 用量统计
   context          上下文规模分析：档位分布/成本占比/最肥会话  --days N（默认7）
   roi              效率分析：每$动作数/编辑数/返工率  --days N（默认7）--top N
   plan             未来24小时限额规划（刷新时刻×历史高峰时间轴）
+  agents           子代理成本归因（Task／Workflow代理花了多少）
+                   --days N（默认7）--session <会话id前缀> 下钻fan-out成本树
+  last             上一场会话的小票（成本/时长/编辑/返工率，SessionEnd钩子结算）
+                   --n N 列出最近N张
+  serve            本地实时Web仪表盘（127.0.0.1，SSE自动刷新，Ctrl+C停止）
+                   --port N（默认3737）--days N（默认30）--no-open
   card             生成月度用量分享卡片（SVG）  --out 路径 --no-open
   advise           用量优化建议（缓存/上下文/触顶/模型组合/订阅性价比）
   errors           API错误诊断：限流/过载/超时/网络分类统计  --days N（默认7）
@@ -3028,7 +3421,10 @@ const HELP = `claude-usage-monitor — Claude Code 用量统计
   team             团队视图：本机＋已同步设备/成员的成本汇总  --days N（默认30）
   forget <设备名>  移除某台已导入设备的数据
   statusline       状态栏输出（由 Claude Code statusLine 调用）
-  hook-session-start  会话启动钩子：昨日小结＋限额预警（由插件钩子调用）
+  hook-session-start  会话启动钩子：昨日小结＋限额预警＋上次小票（由插件钩子调用）
+  hook-session-end    会话结束钩子：结算会话小票（由插件钩子调用）
+  hook-stop-failure   回合中断钩子：记录限流/过载黑匣子（由插件钩子调用）
+  hook-prompt-guard   预算守卫钩子：超预算软提醒/硬拦截（由插件钩子调用）
 
 选项:
   --json           输出 JSON（供程序读取）
@@ -3056,16 +3452,22 @@ async function main() {
     export: cmdExport, import: cmdImport, sync: cmdSync, team: cmdTeam, forget: cmdForget,
     hours: cmdHours, doctor: cmdDoctor,
     context: cmdContext, advise: cmdAdvise, errors: cmdErrors,
-    roi: cmdRoi, plan: cmdPlan, card: cmdCard,
-    live: cmdLive, prune: cmdPrune,
+    roi: cmdRoi, plan: cmdPlan, card: cmdCard, agents: cmdAgents, last: cmdLast,
+    live: cmdLive, prune: cmdPrune, serve: cmdServe,
     'hook-session-start': cmdHookSessionStart,
+    'hook-session-end': cmdHookSessionEnd,
+    'hook-stop-failure': cmdHookStopFailure,
+    'hook-prompt-guard': cmdHookPromptGuard,
   };
   const fn = commands[cmd];
   if (!fn) { console.log(L(HELP, HELP_EN)); process.exitCode = cmd === 'help' ? 0 : 1; return; }
   await fn(opts);
 }
 
-export { loadEntries, computeBlocks, localDate, resolvePricing, inputPriceOf, newToolSink, prettyProject, PRICING };
+export {
+  loadEntries, computeBlocks, localDate, resolvePricing, inputPriceOf, newToolSink,
+  prettyProject, PRICING, fetchOfficialUsage, limitEntries, lang, dataDirs,
+};
 
 // Run only when invoked directly (report.mjs imports this file as a library).
 if (process.argv[1] && path.basename(process.argv[1]) === 'usage.mjs') {

@@ -566,7 +566,8 @@ document.addEventListener('pointerout', e => {
 // Entry
 // ---------------------------------------------------------------------------
 
-export async function generateReport({ days = 30, out, open = true } = {}) {
+/** Build the full report HTML string (shared by generateReport and serve). */
+export async function renderReportHtml(days = 30) {
   // load enough to cover both the report range and the full last calendar week,
   // so the week-compare chart never sees a truncated "last week"
   const lastMon = mondayOf(new Date()); lastMon.setDate(lastMon.getDate() - 7);
@@ -600,7 +601,11 @@ export async function generateReport({ days = 30, out, open = true } = {}) {
   const sameCut = lastMon.getTime() + (now - thisMon.getTime());
   data.weekPrevSameUsd = raw.reduce((s, e) =>
     s + (e.ts >= lastMon.getTime() && e.ts < sameCut ? e.cost : 0), 0);
-  const html = buildHtml(data, entries, days);
+  return buildHtml(data, entries, days);
+}
+
+export async function generateReport({ days = 30, out, open = true } = {}) {
+  const html = await renderReportHtml(days);
   const outPath = out || path.join(os.tmpdir(), 'claude-usage-report.html');
   fs.writeFileSync(outPath, html, 'utf8');
   console.log(`报告已生成：${outPath}`);

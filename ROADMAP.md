@@ -48,9 +48,30 @@
 
 - [x] 英文UI（P0范围）：all/today/limits/blocks/roi/plan/statusline/help与失败文案全部en/zh双语，`--lang`＞`CLAUDE_USAGE_LANG`＞`display.lang`＞locale自动检测（中文环境默认中文）。
 
+## 已完成（v1.2.0）
+
+- [x] 子代理成本归因：修复subagents/转写漏记（总额自动补齐）＋`agents`命令（类型排行＋`--session`下钻fan-out成本树）。
+- [x] 会话小票：SessionEnd钩子自动结算＋`last`命令＋开屏「上次会话」一行摘要。
+- [x] 限流黑匣子：StopFailure钩子实录真实中断，errors/limits预测vs现实闭环。
+- [x] 预算熔断器：UserPromptSubmit钩子软提醒＋可选`budget_hard_cap`硬拦截（fail-open）。
+- [x] serve实时Web仪表盘：127.0.0.1本地驾驶舱，实时条＋秒级倒计时＋SSE自动刷新。
+
 ## 进行中
 
 - [ ] 英文UI（P1范围）：advise/errors/doctor/sessions/context等其余命令面英文化。
+
+## 候选池（多agent侦察提案，按优先级）
+
+- [ ] worklog周报生成器：按天分组的人话版工作叙事（活跃时长口径），给导师/老板看的Markdown。
+- [ ] wrapped月度/年度故事页：Spotify Wrapped式整屏滚动HTML，模型人设与称号，可分享。
+- [ ] subagentStatusLine：官方新接口，agent面板每行显示该子代理实时成本与上下文占用。
+- [ ] badges成就系统：streak连续天数、里程碑，开屏解锁播报。
+- [ ] live终端驾驶舱升级：alt-screen无闪烁渲染、秒级倒计时、双节拍架构。
+- [ ] card英文化＋浏览器端一键转PNG晒图。
+- [ ] PreCompact/PostCompact压缩审计：量化auto-compact的隐性重缓存成本。
+- [ ] 数据层迁移${CLAUDE_PLUGIN_DATA}：升级/重装不丢账本。
+- [ ] plugin.json userConfig：启用插件时官方引导式配置。
+- [ ] roi --session文件级churn下钻：从返工率到「哪个文件在反复改」。
 
 ## 远期想法
 

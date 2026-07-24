@@ -2,7 +2,7 @@
 
 # claude-usage-monitor
 
-**Reads your real Anthropic rate limits (5h / 7d / per-model weekly) instead of estimating them — then goes further: per-task cost attribution, rework-rate ROI analytics, and a built-in advice engine. Zero dependencies, English & Chinese output.**
+**Reads your real Anthropic rate limits (5h / 7d / per-model weekly) instead of estimating them — then goes further: per-task cost attribution, subagent (Task/Workflow) spend accounting, rework-rate ROI analytics, session receipts, an optional daily-budget hard-stop, and a live local web dashboard. Zero dependencies, English & Chinese output.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](package.json)
@@ -25,7 +25,7 @@ npx github:1931840268/claude-usage-monitor all
 ```
 
 ```bash
-# Full plugin install: 23 slash commands + SessionStart hooks + statusline + 17 MCP tools
+# Full plugin install: 26 slash commands + 4 lifecycle hooks + statusline + 19 MCP tools
 claude plugin marketplace add 1931840268/claude-usage-monitor
 claude plugin install usage-monitor@usage-monitor-market
 ```
@@ -47,7 +47,7 @@ Honest version, checked against both projects' docs on 2026-07-24. [ccusage](htt
 | Advice engine (cache health, context bloat, model mix) | – | – | ✓ |
 | 24h limit planner (resets × your peak hours) | – | – | ✓ |
 | Scheduled briefings³ (daily/weekly, auto-archived HTML) | – | – | ✓ via SessionStart hook |
-| Ships as a Claude Code plugin (slash commands + hooks + MCP) | – | – | ✓ 23 cmds, 17 MCP tools |
+| Ships as a Claude Code plugin (slash commands + hooks + MCP) | – | – | ✓ 26 cmds, 19 MCP tools |
 | Runtime | native binary via npx/bunx | Python + pip | reuses Claude Code's own Node |
 
 ¹ Requires a Pro/Max subscription (OAuth). API-key accounts have no rate-limit data — the plugin falls back to ccusage-compatible local window estimates. ccusage parses limit-reset timestamps from transcripts after you hit a limit, but does not query quota utilization.
@@ -61,6 +61,11 @@ Honest version, checked against both projects' docs on 2026-07-24. [ccusage](htt
 | <img src="docs/assets/roi.png" alt="roi (synthetic demo data)" /> | <img src="docs/assets/plan.png" alt="plan (synthetic demo data)" /> |
 
 <details>
+<summary><b>Live local web dashboard (<code>usage serve</code>) — ticking limit countdowns, burn rate, auto-refresh via SSE (report UI is Chinese-first for now)</b></summary>
+<img src="docs/assets/serve.png" alt="live dashboard (synthetic demo data)" />
+</details>
+
+<details>
 <summary><b>Zero-dependency HTML report (8 charts, light/dark, theme toggle)</b></summary>
 <img src="docs/assets/report.png" alt="html report (synthetic demo data)" />
 </details>
@@ -72,11 +77,14 @@ Honest version, checked against both projects' docs on 2026-07-24. [ccusage](htt
 
 ## Feature map
 
-- **Official truth** — `limits` (real quotas + reset times + exit codes for scripting), `blocks` (ccusage-compatible 5h windows), time-to-limit ETA, rate-limit hit markers.
-- **Deep analytics** — `sessions` (task titles), `roi` (rework rate), `context` (context-size cost bands), `hours` (weekday×hour heatmap), `errors` (API failure taxonomy), `tools`, `projects`, `cache`.
+- **Official truth** — `limits` (real quotas + reset times + exit codes for scripting), `blocks` (ccusage-compatible 5h windows), time-to-limit ETA, rate-limit hit markers, plus a **StopFailure black box**: a hook records every real rate-limit/overload abort, so `limits`/`errors` show prediction *and* reality.
+- **Deep analytics** — `agents` (subagent/Task/Workflow spend attribution with per-session fan-out drill-down), `sessions` (task titles), `roi` (rework rate), `context` (context-size cost bands), `hours` (weekday×hour heatmap), `errors` (API failure taxonomy), `tools`, `projects`, `cache`.
+- **Session receipts** — a SessionEnd hook settles every session into a receipt (cost, active time, edits, rework rate, cache hit rate, why it ended); `last` shows it, and the next session greets you with a one-line summary.
+- **Budget guard** — soft warning at 80% of `daily_budget_usd`; opt-in `budget_hard_cap` blocks new prompts once you're over (fails open on any error).
 - **Decisions, not just numbers** — `advise` engine, `plan` 24h timeline, monthly forecast + subscription-value multiple on the dashboard.
-- **Automation** — SessionStart hook: daily brief, weekly recap, archived HTML weekly reports, limit warnings, background multi-device sync; statusline with anomaly burn sentinel.
-- **Integrations** — 23 slash commands, 17 MCP tools (`usage_dashboard`, `usage_advise`, `usage_roi`, …), `--json` everywhere, `--csv` exports, `live` terminal dashboard, `card` monthly SVG, `doctor` self-check.
+- **Automation** — 4 lifecycle hooks (SessionStart brief/recap/limit warnings, SessionEnd receipts, StopFailure black box, UserPromptSubmit budget guard), background multi-device sync, statusline with anomaly burn sentinel.
+- **Live views** — `serve` local web dashboard (127.0.0.1-only, SSE auto-refresh, ticking countdowns), `live` terminal dashboard.
+- **Integrations** — 26 slash commands, 19 MCP tools (`usage_dashboard`, `usage_agents`, `usage_last`, …), `--json` everywhere, `--csv` exports, `card` monthly SVG, `doctor` self-check.
 - **Team & fleet** — folder-based auto sync (`sync_dir`), per-device/member `team` view, strict import sanitization.
 
 Language: core commands (`all`, `today`, `limits`, `blocks`, `roi`, `plan`, statusline, help) are fully localized (en/zh, auto-detected); remaining analytics commands are Chinese-first with English on the [roadmap](ROADMAP.md). Full command reference & configuration: [中文文档](README_zh.md).
@@ -85,7 +93,7 @@ Language: core commands (`all`, `today`, `limits`, `blocks`, `roi`, `plan`, stat
 
 You should not have to trust a new repo — verify it in 30 seconds:
 
-- **Zero dependencies.** Three plain `.mjs` files, no install scripts, no lockfile to poison.
+- **Zero dependencies.** Four plain `.mjs` files, no install scripts, no lockfile to poison.
 - **One outbound endpoint.** The only network call is Anthropic's own usage API, using the credentials Claude Code already stores. Check for yourself:
 
 ```bash

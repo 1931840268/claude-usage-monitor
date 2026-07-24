@@ -59,6 +59,10 @@ const TOOLS = [
     description: '效率分析：每会话的每$动作数、编辑量、返工率（days默认7）' },
   { name: 'usage_plan', cmd: ['plan'], args: [],
     description: '未来24小时限额规划：5小时/7天刷新时刻与历史小时负载画像' },
+  { name: 'usage_agents', cmd: ['agents'], args: ['days'],
+    description: '子代理成本归因：Task/Workflow代理按类型的成本、请求数、主力模型（days默认7）' },
+  { name: 'usage_last', cmd: ['last'], args: ['n'],
+    description: '会话小票：最近n场已结束会话的成本/时长/编辑/返工率（SessionEnd钩子结算，n默认1）' },
 ];
 
 function schemaFor(t) {
